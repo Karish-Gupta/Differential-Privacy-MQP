@@ -1,2 +1,3 @@
 FastDP Setup
 Run for fastDP: pip install git+https://github.com/awslabs/fast-differential-privacy.git
+Run for torchP: pip3 install torch torchvision --index-url https://download.pytorch.org/whl/cu126

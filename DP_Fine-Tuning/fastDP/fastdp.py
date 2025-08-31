@@ -11,6 +11,7 @@ from datasets import load_dataset
 from fastDP import PrivacyEngine
 import os
 
+
 # Load Dataset
 dataset = load_dataset("rajpurkar/squad")
 
@@ -29,7 +30,7 @@ tokenizer.pad_token = tokenizer.eos_token
 def tokenize(example):
    model_inputs = tokenizer(
       example["input_text"],
-      max_lengths=512,
+      max_length=512,
       truncation=True,
       padding="max_length"
    )
@@ -42,12 +43,12 @@ def tokenize(example):
    model_inputs["labels"] = labels["input_ids"]
    return model_inputs
 
-tokenized_datasets = dataset.map(tokenize, batched=True, remove_columns=dataset["train"].column_name)
+tokenized_datasets = dataset.map(tokenize, batched=True, remove_columns=dataset["train"].column_names)
 
 model = AutoModelForCausalLM.from_pretrained(
-    model_name,
-    torch_dtype=torch.bfloat16,
-    device_map="auto"
+   model_name,
+   dtype=torch.bfloat16,
+   device_map="auto"
 )
 
 # Training args
@@ -56,7 +57,7 @@ training_args = TrainingArguments(
    per_device_train_batch_size=2,
    per_device_eval_batch_size=2,
    gradient_accumulation_steps=8,
-   evaluation_strategy="steps",
+   # evaluation_strategy="steps",
    # eval_steps=200,
    # save_steps=500,
    logging_steps=50,
@@ -64,8 +65,9 @@ training_args = TrainingArguments(
    num_train_epochs=1,
    weight_decay=0.01,
    warmup_steps=100,
-   fp16=False,
-   bf16=True,
+   fp16=True,
+   bf16=False,
+   gradient_checkpointing=True,
    dataloader_drop_last=True,
    report_to="none"
 )
