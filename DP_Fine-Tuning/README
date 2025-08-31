@@ -1,1 +1,2 @@
-    
+FastDP Setup
+Run for fastDP: pip install git+https://github.com/awslabs/fast-differential-privacy.git
