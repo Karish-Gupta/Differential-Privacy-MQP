@@ -12,17 +12,16 @@
 module load python/3.10.0
 module load cuda/12.4.0/3mdaov5
 
-python3 -m venv env
 source env/bin/activate
 
+pip install --upgrade pip
 pip install git+https://github.com/awslabs/fast-differential-privacy.git
-pip3 install --upgrade pip
-pip3 install numpy
-pip3 install torch
-pip3 install transformers
-pip3 install datasets
-pip3 install tqdm
-pip3 install scikit-learn
-pip3 install accelerate
+pip install numpy
+pip install torch
+pip install transformers
+pip install datasets
+pip install tqdm
+pip install scikit-learn
+pip install accelerate
 
-python3 fastdp.py
+python fastdp.py

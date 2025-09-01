@@ -9,8 +9,12 @@ from transformers import (
 from datasets import load_dataset
 # from peft import LoraConfig 
 from fastDP import PrivacyEngine
+from huggingface_hub import login
 import os
 
+# Login to HF CLI
+if "HF_TOKEN" in os.environ:
+    login(token=os.environ["HF_TOKEN"])
 
 # Load Dataset
 dataset = load_dataset("rajpurkar/squad")
@@ -65,8 +69,8 @@ training_args = TrainingArguments(
    num_train_epochs=1,
    weight_decay=0.01,
    warmup_steps=100,
-   fp16=True,
-   bf16=False,
+   fp16=False,
+   bf16=True,
    gradient_checkpointing=True,
    dataloader_drop_last=True,
    report_to="none"
