@@ -9,11 +9,12 @@
 #SBATCH -t 02:00:00                   # time limit of 2 hours
 #SBATCH --gres=gpu:H200:1             # request 1 H200 GPU
 
-module load python/3.10.0
+module load python/3.10.2/mqmlxcf
 module load cuda/12.4.0/3mdaov5
 
 source env/bin/activate
 
+pip install -U "huggingface_hub[cli]"
 pip install --upgrade pip
 pip install git+https://github.com/awslabs/fast-differential-privacy.git
 pip install numpy
