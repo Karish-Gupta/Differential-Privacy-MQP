@@ -1,7 +1,9 @@
-# Training Llama2 with Differential Privacy using FlashDP and HuggingFace
+# Training Llama3 with Differential Privacy using FlashDP and HuggingFace
 import sys
 import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'flashdp'))
+
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 import torch
 from torch.utils.data import DataLoader, Dataset
@@ -22,7 +24,8 @@ DP_NOISE = 1.0
 # --- Data Section ---
 class SquadTextDataset(Dataset):
     def __init__(self, tokenizer, split="train", max_length=256):
-        self.data = load_dataset("squad", split=f"{split}[:200]")
+        # Use more data: increase slice from [:200] to [:2000] (or remove slice for full set)
+        self.data = load_dataset("squad", split=f"{split}[:2000]")
         self.tokenizer = tokenizer
         self.max_length = max_length
         self.samples = self._preprocess()
@@ -92,18 +95,12 @@ def train(model, dataloader, optimizer, device, epochs=1):
         print(f"Epoch {epoch+1}, Loss: {avg_loss:.4f}")
         # Optionally: evaluate on validation set here for utility
 
-    # --- Privacy accounting (example, adjust for your DP engine) ---
-    # If FlashDP provides a privacy accountant, use it here.
-    # Otherwise, print the DP parameters used:
     print(f"DP Training completed with noise_multiplier={DP_NOISE}, C={DP_C}, epochs={epochs}, batch_size={BATCH_SIZE}")
-    # If you have a function to compute epsilon, print it:
-    # epsilon = compute_epsilon(...)
-    # print(f"Achieved (ε, δ)-DP with ε={epsilon:.2f}, δ=1e-5")
 
 # --- Evaluation/Inference Section (SQuAD QA integration) ---
 def evaluate(model, tokenizer, device):
-    # Use a larger validation set for better metrics
-    squad_dataset = load_dataset("squad", split="validation[:100]")
+    # Use more validation data: increase from [:100] to [:1000] (or remove slice for full set)
+    squad_dataset = load_dataset("squad", split="validation[:1000]")
 
     def preprocess_function(examples):
         prompts = []
@@ -118,6 +115,7 @@ def evaluate(model, tokenizer, device):
     losses = []
     predictions = []
     references = []
+    contains_correct = []
     for example in processed_dataset:
         inputs = tokenizer(example["prompt"], return_tensors="pt").to(device)
         with torch.no_grad():
@@ -128,17 +126,26 @@ def evaluate(model, tokenizer, device):
             lm_out = model(input_ids=labels, labels=labels)
             loss = lm_out.loss.item()
             losses.append(loss)
-        answer = tokenizer.decode(outputs[0], skip_special_tokens=True).split("Answer:")[-1].strip()
+        # Extract only the generated answer (remove prompt/context)
+        full_output = tokenizer.decode(outputs[0], skip_special_tokens=True)
+        if "Answer:" in full_output:
+            answer = full_output.split("Answer:")[-1].strip()
+        else:
+            answer = full_output.strip()
         predictions.append(answer.lower())
         # Use the first reference answer from SQuAD
-        references.append(example.get("answers", {}).get("text", [""])[0].lower() if "answers" in example else "")
+        ref = example.get("answers", {}).get("text", [""])[0].lower() if "answers" in example else ""
+        references.append(ref)
+        # Contains metric: check if reference is a substring of the answer (case-insensitive, strip spaces)
+        contains_correct.append(ref in answer.lower())
 
     avg_loss = sum(losses) / len(losses) if losses else float('nan')
-    # Simple exact match accuracy
     accuracy = accuracy_score(references, predictions)
+    contains_accuracy = sum(contains_correct) / len(contains_correct) if contains_correct else float('nan')
     print(f"Validation Loss: {avg_loss:.4f}")
     print(f"Validation Exact Match Accuracy: {accuracy:.4f}")
-    # Optionally print a few predictions for qualitative analysis
+    print(f"Validation Contains Accuracy: {contains_accuracy:.4f}")
+    # Printing a few predictions for qualitative analysis
     for i in range(min(3, len(predictions))):
         print(f"Q: {processed_dataset[i]['question']}")
         print(f"True: {references[i]}")
