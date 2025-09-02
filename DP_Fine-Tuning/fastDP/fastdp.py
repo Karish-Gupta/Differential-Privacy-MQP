@@ -1,6 +1,6 @@
 import torch
 from torch.utils.data import DataLoader
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, default_data_collator
 from datasets import load_dataset
 from fastDP import PrivacyEngine
 from huggingface_hub import login
@@ -19,7 +19,7 @@ gradient_accumulation_steps = 8
 num_epochs = 1
 learning_rate = 2e-4
 max_input_length = 512
-max_target_length = 128
+max_target_length = 512
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 target_epsilon = 8.0
@@ -62,8 +62,8 @@ def tokenize(example):
 tokenized_datasets = dataset.map(tokenize, batched=True, remove_columns=dataset["train"].column_names)
 
 # Dataloaders
-train_loader = DataLoader(tokenized_datasets["train"], batch_size=train_batch_size, shuffle=True)
-val_loader = DataLoader(tokenized_datasets["validation"], batch_size=eval_batch_size)
+train_loader = DataLoader(tokenized_datasets["train"], batch_size=train_batch_size, shuffle=True, collate_fn=default_data_collator)
+val_loader = DataLoader(tokenized_datasets["validation"], batch_size=eval_batch_size, collate_fn=default_data_collator)
 
 
 # Intialize model
