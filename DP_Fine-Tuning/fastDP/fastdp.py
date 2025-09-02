@@ -1,4 +1,5 @@
 import torch
+import transformers
 from torch.utils.data import DataLoader
 from transformers import AutoModelForCausalLM, AutoTokenizer, default_data_collator
 from datasets import load_dataset
@@ -9,7 +10,8 @@ import os
 # Login to HF CLI
 if "HF_TOKEN" in os.environ:
     login(token=os.environ["HF_TOKEN"])
-    
+transformers.utils.logging.set_verbosity_debug()
+
 
 # Model Configs
 model_name = "meta-llama/Meta-Llama-3-8B-Instruct"
@@ -73,7 +75,6 @@ model = AutoModelForCausalLM.from_pretrained(
    device_map="auto"
 )
 model.gradient_checkpointing_enable()
-model.to(device)
 
 optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
 
