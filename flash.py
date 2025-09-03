@@ -65,10 +65,11 @@ def load_llama2_with_flashdp(model_name, device):
         sys.exit(1)
     # If access is all ok, proceed to load model and tokenizer
     tokenizer = AutoTokenizer.from_pretrained(model_name)
-    model = AutoModelForCausalLM.from_pretrained(model_name, device_map="cuda:0")  # Force all weights to cuda:0
+    # Use HuggingFace device_map="auto" for multi-GPU
+    model = AutoModelForCausalLM.from_pretrained(model_name, device_map="auto")
     model = model.to(torch.float32)
     tokenizer.pad_token = tokenizer.eos_token
-    model = model.to(device)
+    # Do NOT move model to device or wrap with DataParallel
     model = wrap_with_flashdp_layers(
         model,
         target_modules=[torch.nn.Linear, torch.nn.LayerNorm],
@@ -84,7 +85,7 @@ def train(model, dataloader, optimizer, device, epochs=1):
     for epoch in range(epochs):
         total_loss = 0
         for x, y in dataloader:
-            x, y = x.to(device), y.to(device)
+            # Do NOT move x, y to device; let HF handle device placement
             outputs = model(input_ids=x, labels=y)
             loss = outputs.loss
             loss.backward()
@@ -117,11 +118,11 @@ def evaluate(model, tokenizer, device):
     references = []
     contains_correct = []
     for example in processed_dataset:
-        inputs = tokenizer(example["prompt"], return_tensors="pt").to(device)
+        # Do NOT move inputs to device; let HF handle device placement
+        inputs = tokenizer(example["prompt"], return_tensors="pt")
         with torch.no_grad():
             outputs = model.generate(**inputs, max_new_tokens=30, do_sample=False)
-            # For loss calculation, get model output logits
-            lm_inputs = tokenizer(example["prompt"], return_tensors="pt", padding=True, truncation=True, max_length=inputs["input_ids"].shape[1]).to(device)
+            lm_inputs = tokenizer(example["prompt"], return_tensors="pt", padding=True, truncation=True, max_length=inputs["input_ids"].shape[1])
             labels = lm_inputs["input_ids"]
             lm_out = model(input_ids=labels, labels=labels)
             loss = lm_out.loss.item()
@@ -157,6 +158,7 @@ def main():
         print("ERROR: FlashDP requires a CUDA-enabled GPU to run (Triton kernel error: 0 active drivers).")
         print("Please run this script on a machine with a CUDA GPU and the correct CUDA drivers installed.")
         sys.exit(1)
+    print(f"Using {torch.cuda.device_count()} GPU(s).")
     model, tokenizer = load_llama2_with_flashdp(MODEL_NAME, device)
     dataset = SquadTextDataset(tokenizer, split="train", max_length=MAX_LENGTH)
     dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True)
