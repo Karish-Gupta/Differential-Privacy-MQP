@@ -95,7 +95,7 @@ class StandardModel:
     def init_model(self):
         self.model = AutoModelForCausalLM.from_pretrained(
             self.model_name,
-            torch_dtype=torch.bfloat16,
+            torch_dtype=torch.float32,
             device_map="auto",
             offload_folder="offload"
         )
@@ -164,7 +164,6 @@ class StandardModel:
         exact_match = np.mean(em_scores)
         print(f"Exact Match Accuracy: {exact_match:.4f}")
         return exact_match
-
 
 
 
