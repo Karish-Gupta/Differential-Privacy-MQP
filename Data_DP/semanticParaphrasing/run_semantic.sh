@@ -12,7 +12,7 @@
 module load python/3.10.2/mqmlxcf
 module load cuda/12.4.0/3mdaov5
 
-python3 -m env
+python3 -m venv env
 source env/bin/activate
 
 pip3 install -U "huggingface_hub[cli]"
