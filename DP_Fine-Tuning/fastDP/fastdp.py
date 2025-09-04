@@ -99,9 +99,8 @@ class FastDPModel:
    def init_model(self):
       self.model = AutoModelForCausalLM.from_pretrained(
          self.model_name,
-         torch_dtype=torch.bfloat16,
-         device_map="auto",
-         offload_folder="offload"
+         torch_dtype=torch.float32,
+         device_map="auto"
       )
       self.model.gradient_checkpointing_enable()
 
