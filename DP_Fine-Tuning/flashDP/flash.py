@@ -2,6 +2,7 @@
 import sys
 import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'flashdp'))
+
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 import torch
@@ -90,7 +91,7 @@ class FlashDPModel:
         self.model = self.model.to(torch.float32)
         self.model = wrap_with_flashdp_layers(
             self.model,
-            target_modules=[torch.nn.Linear, torch.nn.LayerNorm],
+            target_modules=[torch.nn.Linear],  # Removed torch.nn.LayerNorm
             skip_layers=[],
             C=self.dp_c,
             noise_multiplier=self.dp_noise
@@ -133,9 +134,21 @@ class FlashDPModel:
         contains_correct = []
         for example in processed_dataset:
             inputs = self.tokenizer(example["prompt"], return_tensors="pt")
+            # Move input_ids to model device before generate
+            model_device = next(self.model.parameters()).device
+            for k in inputs:
+                inputs[k] = inputs[k].to(model_device)
             with torch.no_grad():
                 outputs = self.model.generate(**inputs, max_new_tokens=30, do_sample=False)
-                lm_inputs = self.tokenizer(example["prompt"], return_tensors="pt", padding=True, truncation=True, max_length=inputs["input_ids"].shape[1])
+                lm_inputs = self.tokenizer(
+                    example["prompt"], 
+                    return_tensors="pt", 
+                    padding=True, 
+                    truncation=True, 
+                    max_length=inputs["input_ids"].shape[1]
+                )
+                for k in lm_inputs:
+                    lm_inputs[k] = lm_inputs[k].to(model_device)
                 labels = lm_inputs["input_ids"]
                 lm_out = self.model(input_ids=labels, labels=labels)
                 loss = lm_out.loss.item()
