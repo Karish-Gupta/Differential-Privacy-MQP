@@ -6,23 +6,23 @@
 #SBATCH -o flashdp_run_%j.out         # name of the output file
 #SBATCH -e flashdp_run_%j.err         # name of the error file
 #SBATCH -p short                      # partition to submit to
-#SBATCH -t 01:00:00                   # time limit of 1 hour
+#SBATCH -t 03:00:00                   # time limit of 3 hours
 #SBATCH --gres=gpu:H200:1             # request 1 H200 GPU
 
 module load python/3.11.10
 module load cuda/12.4.0/3mdaov5
 
-python3 -m venv pytorch_example_env
+python -m venv pytorch_example_env
 source pytorch_example_env/bin/activate
 
-pip3 install --upgrade pip
-pip3 install numpy
-pip3 install torch
-pip3 install transformers
-pip3 install datasets
-pip3 install tqdm
-pip3 install scikit-learn
-pip3 install sentencepiece
-pip3 install accelerate
+pip install --upgrade pip
+pip install numpy
+pip install torch
+pip install transformers
+pip install datasets
+pip install tqdm
+pip install scikit-learn
+pip install sentencepiece
+pip install accelerate
 
-python3 flash.py
+python flash.py
