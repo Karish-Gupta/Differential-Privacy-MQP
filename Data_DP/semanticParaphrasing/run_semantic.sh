@@ -24,4 +24,4 @@ pip install tqdm
 pip install scikit-learn
 pip install accelerate
 
-python fastdp.py
+python paraphraser.py
