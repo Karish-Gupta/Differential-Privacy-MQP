@@ -7,164 +7,157 @@ os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 import torch
 from torch.utils.data import DataLoader, Dataset
-from transformers import AutoModelForCausalLM, AutoTokenizer
-from flashdp.api.wrap_model import wrap_with_flashdp_layers
+from transformers import AutoModelForCausalLM, AutoTokenizer, default_data_collator
+from transformers.utils import logging
 from datasets import load_dataset
-from sklearn.metrics import accuracy_score
+from flashdp.api.wrap_model import wrap_with_flashdp_layers
+from utils import evaluate_exact_match  # Importing the eval function from utils.py
 
-# --- Config Section ---
-MODEL_NAME = "mlabonne/Meta-Llama-3-8B"
-MAX_LENGTH = 256        # Increase sequence length for more realistic training
-BATCH_SIZE = 4          # Increase batch size for better throughput
-EPOCHS = 3              # Train for more epochs
-LR = 1e-5
-DP_C = 1.0
-DP_NOISE = 1.0
+logging.set_verbosity_error()
 
-# --- Data Section ---
-class SquadTextDataset(Dataset):
-    def __init__(self, tokenizer, split="train", max_length=256):
-        # Use more data: increase slice from [:200] to [:2000] (or remove slice for full set)
-        self.data = load_dataset("squad", split=f"{split}[:2000]")
-        self.tokenizer = tokenizer
+class FlashDPModel:
+    def __init__(
+        self,
+        model_name,
+        train_batch_size,
+        eval_batch_size,
+        num_epochs,
+        learning_rate,
+        max_length,
+        dp_c,
+        dp_noise,
+    ):
+        self.model_name = model_name
+        self.train_batch_size = train_batch_size
+        self.eval_batch_size = eval_batch_size
+        self.num_epochs = num_epochs
+        self.learning_rate = learning_rate
         self.max_length = max_length
-        self.samples = self._preprocess()
+        self.dp_c = dp_c
+        self.dp_noise = dp_noise
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.tokenizer = None
+        self.model = None
+        self.train_loader = None
+        self.val_loader = None
 
-    def _preprocess(self):
-        samples = []
-        for item in self.data:
-            # Concatenate question and context for LM
-            text = f"question: {item['question']} context: {item['context']} answer: {item['answers']['text'][0] if item['answers']['text'] else ''}"
-            tokens = self.tokenizer.encode(text, max_length=self.max_length, truncation=True, padding="max_length")
-            samples.append(tokens)
-        return samples
+    def preprocess_dataset(self):
+        class SquadTextDataset(Dataset):
+            def __init__(self, tokenizer, split="train", max_length=128):
+                self.data = load_dataset("squad", split=f"{split}[:20]")
+                self.tokenizer = tokenizer
+                self.max_length = max_length
+                self.samples = self._preprocess()
 
-    def __len__(self):
-        return len(self.samples)
+            def _preprocess(self):
+                samples = []
+                for item in self.data:
+                    text = f"question: {item['question']} context: {item['context']} answer: {item['answers']['text'][0] if item['answers']['text'] else ''}"
+                    tokens = self.tokenizer.encode(text, max_length=self.max_length, truncation=True, padding="max_length")
+                    samples.append(tokens)
+                return samples
 
-    def __getitem__(self, idx):
-        x = torch.tensor(self.samples[idx][:-1], dtype=torch.long)
-        y = torch.tensor(self.samples[idx][1:], dtype=torch.long)
-        return x, y
+            def __len__(self):
+                return len(self.samples)
 
-# --- Model Loading and Wrapping ---
-def load_llama2_with_flashdp(model_name, device):
-    # Ensure HuggingFace authentication for gated models like Llama2
-    # Run `huggingface-cli login` in your shell or use the following in code:
-    # from huggingface_hub import login
-    # login(token="YOUR_HF_TOKEN")
-    # Quick access check using pipeline (will raise if not authenticated)
-    from transformers import pipeline
-    try:
-        _ = pipeline("text-generation", model=model_name)
-    except Exception as e:
-        print(f"\nERROR: Unable to access model '{model_name}'.\n"
-              f"Make sure you have accepted the license at https://huggingface.co/{model_name} and are logged in.\n"
-              f"Original error: {e}\n"
-              )
-        sys.exit(1)
-    # If access is all ok, proceed to load model and tokenizer
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    model = AutoModelForCausalLM.from_pretrained(model_name, device_map="cuda:0")  # Force all weights to cuda:0
-    model = model.to(torch.float32)
-    tokenizer.pad_token = tokenizer.eos_token
-    model = model.to(device)
-    model = wrap_with_flashdp_layers(
-        model,
-        target_modules=[torch.nn.Linear, torch.nn.LayerNorm],
-        skip_layers=[],
-        C=DP_C,
-        noise_multiplier=DP_NOISE
-    )
-    return model, tokenizer
+            def __getitem__(self, idx):
+                x = torch.tensor(self.samples[idx][:-1], dtype=torch.long)
+                y = torch.tensor(self.samples[idx][1:], dtype=torch.long)
+                return x, y
 
-# --- Training Loop ---
-def train(model, dataloader, optimizer, device, epochs=1):
-    model.train()
-    for epoch in range(epochs):
-        total_loss = 0
-        for x, y in dataloader:
-            x, y = x.to(device), y.to(device)
-            outputs = model(input_ids=x, labels=y)
-            loss = outputs.loss
-            loss.backward()
-            optimizer.step()
-            optimizer.zero_grad()
-            total_loss += loss.item()
-        avg_loss = total_loss / len(dataloader)
-        print(f"Epoch {epoch+1}, Loss: {avg_loss:.4f}")
-        # Optionally: evaluate on validation set here for utility
+        # Tokenizer
+        self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
+        self.tokenizer.pad_token = self.tokenizer.eos_token
 
-    print(f"DP Training completed with noise_multiplier={DP_NOISE}, C={DP_C}, epochs={epochs}, batch_size={BATCH_SIZE}")
+        # Train loader
+        train_dataset = SquadTextDataset(self.tokenizer, split="train", max_length=128)
+        self.train_loader = DataLoader(train_dataset, batch_size=2, shuffle=True)
 
-# --- Evaluation/Inference Section (SQuAD QA integration) ---
-def evaluate(model, tokenizer, device):
-    # Use more validation data: increase from [:100] to [:1000] (or remove slice for full set)
-    squad_dataset = load_dataset("squad", split="validation[:1000]")
+        # Validation loader
+        val_dataset = SquadTextDataset(self.tokenizer, split="validation", max_length=128)
+        self.val_loader = DataLoader(val_dataset, batch_size=2)
 
-    def preprocess_function(examples):
-        prompts = []
-        for question, context in zip(examples["question"], examples["context"]):
-            prompt = f"Context: {context}\nQuestion: {question}\nAnswer:"
-            prompts.append(prompt)
-        return {"prompt": prompts}
+    def init_model(self):
+        # HuggingFace authentication check
+        from transformers import pipeline
+        try:
+            _ = pipeline("text-generation", model=self.model_name)
+        except Exception as e:
+            print(f"\nERROR: Unable to access model '{self.model_name}'.\n"
+                  f"Make sure you have accepted the license at https://huggingface.co/{self.model_name} and are logged in.\n"
+                  f"Original error: {e}\n")
+            sys.exit(1)
+        self.model = AutoModelForCausalLM.from_pretrained(self.model_name, device_map="auto")
+        self.model = self.model.to(torch.float32)
+        self.model = wrap_with_flashdp_layers(
+            self.model,
+            target_modules=[torch.nn.Linear],  # Removed torch.nn.LayerNorm
+            skip_layers=[],
+            C=self.dp_c,
+            noise_multiplier=self.dp_noise
+        )
+        self.optimizer = torch.optim.AdamW(self.model.parameters(), lr=self.learning_rate)
 
-    processed_dataset = squad_dataset.map(preprocess_function, batched=True)
+    def train(self):
+        self.model.train()
+        model_device = next(self.model.parameters()).device
+        for epoch in range(self.num_epochs):
+            total_loss = 0
+            for x, y in self.train_loader:
+                x, y = x.to(model_device), y.to(model_device)
+                outputs = self.model(input_ids=x, labels=y)
+                loss = outputs.loss
+                loss.backward()
+                self.optimizer.step()
+                self.optimizer.zero_grad()
+                total_loss += loss.item()
+            avg_loss = total_loss / len(self.train_loader)
+            print(f"Epoch {epoch+1}, Loss: {avg_loss:.4f}")
+        print(f"DP Training completed with noise_multiplier={self.dp_noise}, C={self.dp_c}, epochs={self.num_epochs}, batch_size={self.train_batch_size}")
 
-    model.eval()
-    losses = []
-    predictions = []
-    references = []
-    contains_correct = []
-    for example in processed_dataset:
-        inputs = tokenizer(example["prompt"], return_tensors="pt").to(device)
-        with torch.no_grad():
-            outputs = model.generate(**inputs, max_new_tokens=30, do_sample=False)
-            # For loss calculation, get model output logits
-            lm_inputs = tokenizer(example["prompt"], return_tensors="pt", padding=True, truncation=True, max_length=inputs["input_ids"].shape[1]).to(device)
-            labels = lm_inputs["input_ids"]
-            lm_out = model(input_ids=labels, labels=labels)
-            loss = lm_out.loss.item()
-            losses.append(loss)
-        # Extract only the generated answer (remove prompt/context)
-        full_output = tokenizer.decode(outputs[0], skip_special_tokens=True)
-        if "Answer:" in full_output:
-            answer = full_output.split("Answer:")[-1].strip()
-        else:
-            answer = full_output.strip()
-        predictions.append(answer.lower())
-        # Use the first reference answer from SQuAD
-        ref = example.get("answers", {}).get("text", [""])[0].lower() if "answers" in example else ""
-        references.append(ref)
-        # Contains metric: check if reference is a substring of the answer (case-insensitive, strip spaces)
-        contains_correct.append(ref in answer.lower())
+    def evaluate(self):
+        # Use the same validation loader as in preprocess_dataset
+        if self.val_loader is None:
+            print("Validation loader not initialized. Run preprocess_dataset() first.")
+            return
+        model_device = next(self.model.parameters()).device
+        print("Evaluating with Exact Match metric from utils.py...")
+        evaluate_exact_match(
+            self.model,
+            self.val_loader,
+            model_device,
+            self.tokenizer,
+            max_gen_length=30
+        )
 
-    avg_loss = sum(losses) / len(losses) if losses else float('nan')
-    accuracy = accuracy_score(references, predictions)
-    contains_accuracy = sum(contains_correct) / len(contains_correct) if contains_correct else float('nan')
-    print(f"Validation Loss: {avg_loss:.4f}")
-    print(f"Validation Exact Match Accuracy: {accuracy:.4f}")
-    print(f"Validation Contains Accuracy: {contains_accuracy:.4f}")
-    # Printing a few predictions for qualitative analysis
-    for i in range(min(3, len(predictions))):
-        print(f"Q: {processed_dataset[i]['question']}")
-        print(f"True: {references[i]}")
-        print(f"Pred: {predictions[i]}\n")
+if __name__ == "__main__":
+    # Configs
+    model_name = "mlabonne/Meta-Llama-3-8B"
+    train_batch_size = 2
+    eval_batch_size = 2
+    num_epochs = 1
+    learning_rate = 1e-5
+    max_length = 128
+    dp_c = 1.0
+    dp_noise = 1.0
 
-def main():
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    if device.type != "cuda":
+    if torch.cuda.device_count() == 0:
         print("ERROR: FlashDP requires a CUDA-enabled GPU to run (Triton kernel error: 0 active drivers).")
         print("Please run this script on a machine with a CUDA GPU and the correct CUDA drivers installed.")
         sys.exit(1)
-    model, tokenizer = load_llama2_with_flashdp(MODEL_NAME, device)
-    dataset = SquadTextDataset(tokenizer, split="train", max_length=MAX_LENGTH)
-    dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=LR)
-    train(model, dataloader, optimizer, device, epochs=EPOCHS)
-    evaluate(model, tokenizer, device)
+    print(f"Using {torch.cuda.device_count()} GPU(s).")
 
-if __name__ == "__main__":
-    main()
-    main()
-    main()
+    flashdp = FlashDPModel(
+        model_name=model_name,
+        train_batch_size=train_batch_size,
+        eval_batch_size=eval_batch_size,
+        num_epochs=num_epochs,
+        learning_rate=learning_rate,
+        max_length=max_length,
+        dp_c=dp_c,
+        dp_noise=dp_noise,
+    )
+    flashdp.preprocess_dataset()
+    flashdp.init_model()
+    flashdp.train()
+    flashdp.evaluate()
