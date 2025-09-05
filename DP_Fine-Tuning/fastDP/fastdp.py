@@ -1,7 +1,7 @@
 import numpy as np
 import torch
 import tqdm
-import transformers
+from peft import LoraConfig, get_peft_model, TaskType
 from torch.utils.data import DataLoader
 from transformers import AutoModelForCausalLM, AutoTokenizer, default_data_collator
 from datasets import load_dataset
@@ -27,6 +27,12 @@ class FastDPModel:
       max_input_length,
       max_target_length,
       target_epsilon,
+
+      lora_r=16,
+      lora_alpha=32,
+      lora_dropout=0.05,
+      lora_target_modules=None,   # if None, good defaults for LLaMA/Mistral-family are used
+      lora_bias="none",           # "none" | "lora_only" | "all"
    ):
       # Configs
       self.model_name = model_name
@@ -40,6 +46,13 @@ class FastDPModel:
       self.max_target_length = max_target_length
       self.target_epsilon = target_epsilon
       self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+      # LoRA configs
+      self.lora_r = lora_r
+      self.lora_alpha = lora_alpha
+      self.lora_dropout = lora_dropout
+      self.lora_target_modules = lora_target_modules
+      self.lora_bias = lora_bias
 
       # Setup
       self.dataset = None
@@ -104,7 +117,22 @@ class FastDPModel:
       )
       self.model.gradient_checkpointing_enable()
 
-      self.optimizer = torch.optim.AdamW(self.model.parameters(), lr=self.learning_rate)
+      target_modules = self.lora_target_modules or ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+      peft_config = LoraConfig(
+         task_type=TaskType.CAUSAL_LM,
+         r=self.lora_r,
+         lora_alpha=self.lora_alpha,
+         lora_dropout=self.lora_dropout,
+         bias=self.lora_bias,
+         target_modules=target_modules,
+      )
+
+      self.model = get_peft_model(self.model, peft_config)
+      self.model.print_trainable_parameters()
+
+      # Optimizer over only trainable (LoRA) params
+      trainable_params = (p for p in self.model.parameters() if p.requires_grad)
+      self.optimizer = torch.optim.AdamW(trainable_params, lr=self.learning_rate)
 
       effective_batch_size = self.train_batch_size * self.gradient_accumulation_steps
       self.privacy_engine = PrivacyEngine(
@@ -143,10 +171,19 @@ class FastDPModel:
                if step % 50 == 0:
                   print(f"Epoch {epoch+1}, Step {step}, Loss {running_loss / (step+1):.4f}")
 
-      # Save model + tokenizer once at the end
-      self.model.save_pretrained("./llama3-8b-instruct-squad-dp-model")
-      self.tokenizer.save_pretrained("./llama3-8b-instruct-squad-dp-tokenizer")
+      # Detach privacy engine
+      try:
+         self.privacy_engine.detach()
+      except Exception:
+         pass
+
+      # Save LoRA adapters only
+      adapter_dir = "./llama3-8b-instruct-squad-dp-lora"
+      self.model.save_pretrained(adapter_dir)
+      self.tokenizer.save_pretrained(adapter_dir)
      
+
+
 
 if __name__ == "__main__":
    # Model Configs
@@ -182,4 +219,3 @@ if __name__ == "__main__":
    fastdp.preprocess_dataset()
    fastdp.init_model()
    fastdp.train()
-   fastdp.evaluate_exact_match()
