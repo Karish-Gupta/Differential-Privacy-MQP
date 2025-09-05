@@ -146,45 +146,7 @@ class FastDPModel:
       # Save model + tokenizer once at the end
       self.model.save_pretrained("./llama3-8b-instruct-squad-dp-model")
       self.tokenizer.save_pretrained("./llama3-8b-instruct-squad-dp-tokenizer")
-   
-   def evaluate_exact_match(self, max_gen_length=50):
-      self.model.eval()
-      em_scores = []
-
-      for batch in tqdm(self.val_loader, desc="Evaluating"):
-         input_ids = batch["input_ids"].to(self.device)
-         attention_mask = batch["attention_mask"].to(self.device)
-
-         # Generate predictions
-         with torch.no_grad():
-               outputs = self.model.generate(
-                  input_ids=input_ids,
-                  attention_mask=attention_mask,
-                  max_new_tokens=max_gen_length,
-               )
-
-         preds = self.tokenizer.batch_decode(outputs, skip_special_tokens=True)
-         labels = batch["labels"]
-
-         # Convert labels back to text (ignore -100 padding)
-         decoded_labels = []
-         for label_ids in labels:
-               label_ids = [l for l in label_ids.tolist() if l != -100]
-               text = self.tokenizer.decode(label_ids, skip_special_tokens=True)
-               decoded_labels.append(text)
-
-         # Compare predictions to references
-         for pred, ref in zip(preds, decoded_labels):
-               pred_norm = pred.strip().lower()
-               ref_norm = ref.strip().lower()
-               em = 1 if pred_norm == ref_norm else 0
-               em_scores.append(em)
-
-      exact_match = np.mean(em_scores)
-      print(f"Exact Match Accuracy: {exact_match:.4f}")
-      return exact_match
-
-   
+     
 
 if __name__ == "__main__":
    # Model Configs
