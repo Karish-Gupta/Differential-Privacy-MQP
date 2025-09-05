@@ -10,8 +10,8 @@ from torch.utils.data import DataLoader, Dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer, default_data_collator
 from transformers.utils import logging
 from datasets import load_dataset
-from sklearn.metrics import accuracy_score
 from flashdp.api.wrap_model import wrap_with_flashdp_layers
+from utils import evaluate_exact_match  # Importing the eval function from utils.py
 
 logging.set_verbosity_error()
 
@@ -116,63 +116,19 @@ class FlashDPModel:
         print(f"DP Training completed with noise_multiplier={self.dp_noise}, C={self.dp_c}, epochs={self.num_epochs}, batch_size={self.train_batch_size}")
 
     def evaluate(self):
-        squad_dataset = load_dataset("squad", split="validation[:20]")
-
-        def preprocess_function(examples):
-            prompts = []
-            for question, context in zip(examples["question"], examples["context"]):
-                prompt = f"Context: {context}\nQuestion: {question}\nAnswer:"
-                prompts.append(prompt)
-            return {"prompt": prompts}
-
-        processed_dataset = squad_dataset.map(preprocess_function, batched=True)
-
-        self.model.eval()
-        losses = []
-        predictions = []
-        references = []
-        contains_correct = []
-        for example in processed_dataset:
-            inputs = self.tokenizer(example["prompt"], return_tensors="pt")
-            # Move input_ids to model device before generate
-            model_device = next(self.model.parameters()).device
-            for k in inputs:
-                inputs[k] = inputs[k].to(model_device)
-            with torch.no_grad():
-                outputs = self.model.generate(**inputs, max_new_tokens=30, do_sample=False)
-                lm_inputs = self.tokenizer(
-                    example["prompt"], 
-                    return_tensors="pt", 
-                    padding=True, 
-                    truncation=True, 
-                    max_length=inputs["input_ids"].shape[1]
-                )
-                for k in lm_inputs:
-                    lm_inputs[k] = lm_inputs[k].to(model_device)
-                labels = lm_inputs["input_ids"]
-                lm_out = self.model(input_ids=labels, labels=labels)
-                loss = lm_out.loss.item()
-                losses.append(loss)
-            full_output = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
-            if "Answer:" in full_output:
-                answer = full_output.split("Answer:")[-1].strip()
-            else:
-                answer = full_output.strip()
-            predictions.append(answer.lower())
-            ref = example.get("answers", {}).get("text", [""])[0].lower() if "answers" in example else ""
-            references.append(ref)
-            contains_correct.append(ref in answer.lower())
-
-        avg_loss = sum(losses) / len(losses) if losses else float('nan')
-        accuracy = accuracy_score(references, predictions)
-        contains_accuracy = sum(contains_correct) / len(contains_correct) if contains_correct else float('nan')
-        print(f"Validation Loss: {avg_loss:.4f}")
-        print(f"Validation Exact Match Accuracy: {accuracy:.4f}")
-        print(f"Validation Contains Accuracy: {contains_accuracy:.4f}")
-        for i in range(min(3, len(predictions))):
-            print(f"Q: {processed_dataset[i]['question']}")
-            print(f"True: {references[i]}")
-            print(f"Pred: {predictions[i]}\n")
+        # Use the same validation loader as in preprocess_dataset
+        if self.val_loader is None:
+            print("Validation loader not initialized. Run preprocess_dataset() first.")
+            return
+        model_device = next(self.model.parameters()).device
+        print("Evaluating with Exact Match metric from utils.py...")
+        evaluate_exact_match(
+            self.model,
+            self.val_loader,
+            model_device,
+            self.tokenizer,
+            max_gen_length=30
+        )
 
 if __name__ == "__main__":
     # Configs
