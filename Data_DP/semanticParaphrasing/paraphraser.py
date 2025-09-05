@@ -189,6 +189,13 @@ if __name__ == "__main__":
         max_target_length=max_target_length,
     )
 
+    print("preprocessing")
     trainer.preprocess_dataset()
+
+
+    print("initializing model")
     trainer.init_model()
+    
+
     trainer.train()
+    print("training done")
