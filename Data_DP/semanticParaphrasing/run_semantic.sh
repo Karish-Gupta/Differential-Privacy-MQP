@@ -19,6 +19,7 @@ pip3 install -U "huggingface_hub[cli]"
 pip3 install --upgrade pip
 pip3 install numpy
 pip3 install torch
+pip3 install peft
 pip3 install transformers
 pip3 install datasets
 pip3 install tqdm
