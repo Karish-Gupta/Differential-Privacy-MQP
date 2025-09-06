@@ -108,11 +108,13 @@ class LoRAModel:
         )
 
     def init_model(self):
+        print("model init")
         self.model = AutoModelForCausalLM.from_pretrained(
             self.model_name,
             torch_dtype=torch.float32,
             device_map="auto"
         )
+        print("checkpointing")
         self.model.gradient_checkpointing_enable()
 
         target_modules = self.lora_target_modules or [
@@ -126,6 +128,7 @@ class LoRAModel:
             bias=self.lora_bias,
             target_modules=target_modules,
         )
+        print("peft init")
 
         self.model = get_peft_model(self.model, peft_config)
         self.model.print_trainable_parameters()
