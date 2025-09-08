@@ -63,8 +63,13 @@ class FastDPModel:
       self.optimizer = None
       self.privacy_engine = None
 
-   def preprocess_dataset(self):
+   def preprocess_dataset(self, subsample_size, seed=42):
       dataset = load_dataset(self.dataset_name)
+
+      if subsample_size is not None:
+         # Shuffle first to avoid always taking the same top slice
+         dataset["train"] = dataset["train"].shuffle(seed=seed).select(range(subsample_size))
+         dataset["validation"] = dataset["validation"].shuffle(seed=seed).select(range(subsample_size // 10)) 
 
       def preprocess(example):
          example["input_text"] = "Question: " + example["question"] + " Context: " + example["context"]
@@ -80,34 +85,37 @@ class FastDPModel:
 
       def tokenize(example):
          model_inputs = self.tokenizer(
-               example["input_text"],
-               max_length=self.max_input_length,
-               truncation=True,
-               padding="max_length"
+            example["input_text"],
+            max_length=self.max_input_length,
+            truncation=True,
+            padding="max_length"
          )
          labels = self.tokenizer(
-               example["target_text"],
-               max_length=self.max_target_length,
-               truncation=True,
-               padding="max_length"
+            example["target_text"],
+            max_length=self.max_target_length,
+            truncation=True,
+            padding="max_length"
          )
          labels["input_ids"] = [(l if l != self.tokenizer.pad_token_id else -100) for l in labels["input_ids"]]
          model_inputs["labels"] = labels["input_ids"]
          return model_inputs
 
-      self.dataset = dataset.map(tokenize, batched=True, remove_columns=dataset["train"].column_names)
+      self.dataset = dataset.map(
+         tokenize, batched=True, remove_columns=dataset["train"].column_names
+      )
 
       self.train_loader = DataLoader(
-         self.dataset["train"].select(range(5000)),
+         self.dataset["train"],
          batch_size=self.train_batch_size,
          shuffle=True,
          collate_fn=default_data_collator
       )
       self.val_loader = DataLoader(
-         self.dataset["validation"].select(range(100)),
+         self.dataset["validation"],
          batch_size=self.eval_batch_size,
          collate_fn=default_data_collator
       )
+
 
    def init_model(self):
       self.model = AutoModelForCausalLM.from_pretrained(
@@ -216,6 +224,6 @@ if __name__ == "__main__":
          target_epsilon=target_epsilon,
    )
 
-   fastdp.preprocess_dataset()
+   fastdp.preprocess_dataset(subsample_size=5000, seed=101)
    fastdp.init_model()
    fastdp.train()
