@@ -12,6 +12,7 @@ from transformers.utils import logging
 from datasets import load_dataset
 from flashdp.api.wrap_model import wrap_with_flashdp_layers
 from utils import evaluate_exact_match  # Importing the eval function from utils.py
+from peft import LoraConfig, get_peft_model, TaskType  # Added for LoRA
 
 logging.set_verbosity_error()
 
@@ -26,6 +27,11 @@ class FlashDPModel:
         max_length,
         dp_c,
         dp_noise,
+        lora_r=16,
+        lora_alpha=32,
+        lora_dropout=0.05,
+        lora_target_modules=None,
+        lora_bias="none",
     ):
         self.model_name = model_name
         self.train_batch_size = train_batch_size
@@ -40,11 +46,21 @@ class FlashDPModel:
         self.model = None
         self.train_loader = None
         self.val_loader = None
+        # LoRA configs
+        self.lora_r = lora_r
+        self.lora_alpha = lora_alpha
+        self.lora_dropout = lora_dropout
+        self.lora_target_modules = lora_target_modules
+        self.lora_bias = lora_bias
 
     def preprocess_dataset(self):
         class SquadTextDataset(Dataset):
             def __init__(self, tokenizer, split="train", max_length=128):
-                self.data = load_dataset("squad", split=f"{split}[:20]")
+                squad = load_dataset("squad")
+                if split == "train":
+                    self.data = squad["train"].select(range(5000))
+                else:
+                    self.data = squad["validation"].select(range(50))
                 self.tokenizer = tokenizer
                 self.max_length = max_length
                 self.samples = self._preprocess()
@@ -89,14 +105,29 @@ class FlashDPModel:
             sys.exit(1)
         self.model = AutoModelForCausalLM.from_pretrained(self.model_name, device_map="auto")
         self.model = self.model.to(torch.float32)
+        # DP wrapping (before LoRA)
         self.model = wrap_with_flashdp_layers(
             self.model,
-            target_modules=[torch.nn.Linear],  # Removed torch.nn.LayerNorm
+            target_modules=[torch.nn.Linear],
             skip_layers=[],
             C=self.dp_c,
             noise_multiplier=self.dp_noise
         )
-        self.optimizer = torch.optim.AdamW(self.model.parameters(), lr=self.learning_rate)
+        # LoRA config (after FlashDP)
+        target_modules = self.lora_target_modules or ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+        peft_config = LoraConfig(
+            task_type=TaskType.CAUSAL_LM,
+            r=self.lora_r,
+            lora_alpha=self.lora_alpha,
+            lora_dropout=self.lora_dropout,
+            bias=self.lora_bias,
+            target_modules=target_modules,
+        )
+        self.model = get_peft_model(self.model, peft_config)
+        self.model.print_trainable_parameters()
+        # Optimizer over only trainable (LoRA) params
+        trainable_params = (p for p in self.model.parameters() if p.requires_grad)
+        self.optimizer = torch.optim.AdamW(trainable_params, lr=self.learning_rate)
 
     def train(self):
         self.model.train()
@@ -114,6 +145,11 @@ class FlashDPModel:
             avg_loss = total_loss / len(self.train_loader)
             print(f"Epoch {epoch+1}, Loss: {avg_loss:.4f}")
         print(f"DP Training completed with noise_multiplier={self.dp_noise}, C={self.dp_c}, epochs={self.num_epochs}, batch_size={self.train_batch_size}")
+        # Save LoRA adapters only
+        adapter_dir = "./llama3-8b-flashdp-lora"
+        self.model.save_pretrained(adapter_dir)
+        if self.tokenizer:
+            self.tokenizer.save_pretrained(adapter_dir)
 
     def evaluate(self):
         # Use the same validation loader as in preprocess_dataset
@@ -140,6 +176,12 @@ if __name__ == "__main__":
     max_length = 128
     dp_c = 1.0
     dp_noise = 1.0
+    # LoRA configs
+    lora_r = 16
+    lora_alpha = 32
+    lora_dropout = 0.05
+    lora_target_modules = None
+    lora_bias = "none"
 
     if torch.cuda.device_count() == 0:
         print("ERROR: FlashDP requires a CUDA-enabled GPU to run (Triton kernel error: 0 active drivers).")
@@ -156,6 +198,11 @@ if __name__ == "__main__":
         max_length=max_length,
         dp_c=dp_c,
         dp_noise=dp_noise,
+        lora_r=lora_r,
+        lora_alpha=lora_alpha,
+        lora_dropout=lora_dropout,
+        lora_target_modules=lora_target_modules,
+        lora_bias=lora_bias,
     )
     flashdp.preprocess_dataset()
     flashdp.init_model()
