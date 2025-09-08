@@ -98,13 +98,13 @@ class FastDPModel:
       self.dataset = dataset.map(tokenize, batched=True, remove_columns=dataset["train"].column_names)
 
       self.train_loader = DataLoader(
-         self.dataset["train"],
+         self.dataset["train"].select(range(5000)),
          batch_size=self.train_batch_size,
          shuffle=True,
          collate_fn=default_data_collator
       )
       self.val_loader = DataLoader(
-         self.dataset["validation"],
+         self.dataset["validation"].select(range(100)),
          batch_size=self.eval_batch_size,
          collate_fn=default_data_collator
       )

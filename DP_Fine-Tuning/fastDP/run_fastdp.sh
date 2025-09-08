@@ -24,5 +24,6 @@ pip install datasets
 pip install tqdm
 pip install scikit-learn
 pip install accelerate
+pip install peft
 
 python fastdp.py
