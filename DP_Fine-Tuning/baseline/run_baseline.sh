@@ -26,4 +26,4 @@ pip install scikit-learn
 pip install sentencepiece
 pip install accelerate
 
-python paraphraser.py
+python baseline.py
