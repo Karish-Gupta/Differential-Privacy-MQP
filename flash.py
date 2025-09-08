@@ -60,7 +60,7 @@ class FlashDPModel:
                 if split == "train":
                     self.data = squad["train"].select(range(5000)) 
                 else:
-                    self.data = squad["validation"].select(range(50))
+                    self.data = squad["validation"].select(range(100))
                 self.tokenizer = tokenizer
                 self.max_length = max_length
                 self.samples = self._preprocess()
@@ -86,12 +86,12 @@ class FlashDPModel:
         self.tokenizer.pad_token = self.tokenizer.eos_token
 
         # Train loader
-        train_dataset = SquadTextDataset(self.tokenizer, split="train", max_length=128)
+        train_dataset = SquadTextDataset(self.tokenizer, split="train", max_length=512)
         self.train_loader = DataLoader(train_dataset, batch_size=2, shuffle=True)
 
         # Validation loader
-        val_dataset = SquadTextDataset(self.tokenizer, split="validation", max_length=128)
-        self.val_loader = DataLoader(val_dataset, batch_size=2)
+        val_dataset = SquadTextDataset(self.tokenizer, split="validation", max_length=512)
+    self.val_loader = DataLoader(val_dataset, batch_size=2, shuffle=True)
 
     def init_model(self):
         # HuggingFace authentication check
@@ -181,7 +181,7 @@ if __name__ == "__main__":
     eval_batch_size = 2
     num_epochs = 3
     learning_rate = 1e-5
-    max_length = 128
+    max_length = 512
     dp_c = 1.0
     dp_noise = 1.0
     # LoRA configs
