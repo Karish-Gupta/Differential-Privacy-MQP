@@ -11,7 +11,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, default_data_colla
 from transformers.utils import logging
 from datasets import load_dataset
 from flashdp.api.wrap_model import wrap_with_flashdp_layers
-from utils import evaluate_exact_match  # Importing the eval function from utils.py
+from utils import evaluate_exact_match, evaluate_f1  # Importing the eval functions from utils.py
 from peft import LoraConfig, get_peft_model, TaskType  # Added for LoRA
 
 logging.set_verbosity_error()
@@ -55,10 +55,10 @@ class FlashDPModel:
 
     def preprocess_dataset(self):
         class SquadTextDataset(Dataset):
-            def __init__(self, tokenizer, split="train", max_length=128):
+            def __init__(self, tokenizer, split="train", max_length=512):
                 squad = load_dataset("squad")
                 if split == "train":
-                    self.data = squad["train"].select(range(5000))
+                    self.data = squad["train"].select(range(5000)) 
                 else:
                     self.data = squad["validation"].select(range(50))
                 self.tokenizer = tokenizer
@@ -165,13 +165,21 @@ class FlashDPModel:
             self.tokenizer,
             max_gen_length=30
         )
+        print("Evaluating with F1 Score metric from utils.py...")
+        evaluate_f1(
+            self.model,
+            self.val_loader,
+            model_device,
+            self.tokenizer,
+            max_gen_length=30
+        )
 
 if __name__ == "__main__":
     # Configs
     model_name = "mlabonne/Meta-Llama-3-8B"
     train_batch_size = 2
     eval_batch_size = 2
-    num_epochs = 1
+    num_epochs = 3
     learning_rate = 1e-5
     max_length = 128
     dp_c = 1.0
