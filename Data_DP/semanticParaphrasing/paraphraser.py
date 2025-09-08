@@ -22,7 +22,7 @@ class BasicLoRAModel:
         num_epochs,
         learning_rate,
         max_length,
-        lora_r=16,
+        lora_r=8,
         lora_alpha=32,
         lora_dropout=0.05,
         lora_target_modules=None,
@@ -51,7 +51,7 @@ class BasicLoRAModel:
             def __init__(self, tokenizer, split="train", max_length=128):
                 squad = load_dataset("squad")
                 if split == "train":
-                    self.data = squad["train"].select(range(5000))
+                    self.data = squad["train"].select(range(2500))
                 else:
                     self.data = squad["validation"].select(range(50))
                 self.tokenizer = tokenizer
