@@ -13,7 +13,7 @@ import os
 # Login to HF CLI
 if "HF_TOKEN" in os.environ:
    login(token=os.environ["HF_TOKEN"])
-transformers.utils.logging.set_verbosity_debug()
+# transformers.utils.logging.set_verbosity_debug()
 
 class FastDPModel:
    def __init__(
@@ -127,7 +127,7 @@ class FastDPModel:
       )
       self.model.gradient_checkpointing_enable()
 
-      target_modules = self.lora_target_modules or ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+      target_modules = self.lora_target_modules or ["q_proj", "k_proj", "v_proj", "o_proj"]
       peft_config = LoraConfig(
          task_type=TaskType.CAUSAL_LM,
          r=self.lora_r,
@@ -240,7 +240,7 @@ if __name__ == "__main__":
          target_epsilon=target_epsilon,
    )
 
-   fastdp.preprocess_dataset(subsample_size=5000, seed=101)
+   fastdp.preprocess_dataset(subsample_size=2500, seed=101)
    fastdp.init_model()
    fastdp.train()
    fastdp.evaluate()
