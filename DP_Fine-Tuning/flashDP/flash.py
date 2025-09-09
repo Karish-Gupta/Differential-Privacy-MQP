@@ -91,7 +91,7 @@ class FlashDPModel:
 
         # Validation loader
         val_dataset = SquadTextDataset(self.tokenizer, split="validation", max_length=512)
-    self.val_loader = DataLoader(val_dataset, batch_size=2, shuffle=True)
+        self.val_loader = DataLoader(val_dataset, batch_size=2, shuffle=True)
 
     def init_model(self):
         # HuggingFace authentication check
