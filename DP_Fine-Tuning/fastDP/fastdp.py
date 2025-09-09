@@ -6,6 +6,7 @@ from torch.utils.data import DataLoader
 from transformers import AutoModelForCausalLM, AutoTokenizer, default_data_collator
 from datasets import load_dataset
 from fastDP import PrivacyEngine
+from utils import evaluate_exact_match
 from huggingface_hub import login
 import os
 
@@ -62,6 +63,7 @@ class FastDPModel:
       self.model = None
       self.optimizer = None
       self.privacy_engine = None
+
 
    def preprocess_dataset(self, subsample_size, seed=42):
       dataset = load_dataset(self.dataset_name)
@@ -121,7 +123,7 @@ class FastDPModel:
       self.model = AutoModelForCausalLM.from_pretrained(
          self.model_name,
          torch_dtype=torch.float32,
-         device_map="auto"
+         device_map="cuda:0"
       )
       self.model.gradient_checkpointing_enable()
 
@@ -158,6 +160,7 @@ class FastDPModel:
       self.privacy_engine.attach(self.optimizer)
       print("PrivacyEngine attached.")
 
+
    def train(self):
       self.model.train()
       for epoch in range(self.num_epochs):
@@ -189,7 +192,20 @@ class FastDPModel:
       adapter_dir = "./llama3-8b-instruct-squad-dp-lora"
       self.model.save_pretrained(adapter_dir)
       self.tokenizer.save_pretrained(adapter_dir)
-     
+   
+   def evaluate(self):
+      if self.val_loader is None:
+         print("Validation loader not initialized. Run preprocess_dataset() first.")
+         return
+      model_device = next(self.model.parameters()).device
+      print("Evaluating with Exact Match metric from utils.py...")
+      evaluate_exact_match(
+         self.model,
+         self.val_loader,
+         model_device,
+         self.tokenizer,
+         max_gen_length=30,
+      )
 
 
 
@@ -200,7 +216,7 @@ if __name__ == "__main__":
    train_batch_size = 2
    eval_batch_size = 2
    gradient_accumulation_steps = 8
-   num_epochs = 1
+   num_epochs = 3
    learning_rate = 2e-4
    max_input_length = 512
    max_target_length = 512
@@ -227,3 +243,4 @@ if __name__ == "__main__":
    fastdp.preprocess_dataset(subsample_size=5000, seed=101)
    fastdp.init_model()
    fastdp.train()
+   fastdp.evaluate()
