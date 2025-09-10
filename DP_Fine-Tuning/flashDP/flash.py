@@ -53,45 +53,68 @@ class FlashDPModel:
         self.lora_target_modules = lora_target_modules
         self.lora_bias = lora_bias
 
-    def preprocess_dataset(self):
-        class SquadTextDataset(Dataset):
-            def __init__(self, tokenizer, split="train", max_length=512):
-                squad = load_dataset("squad")
-                if split == "train":
-                    self.data = squad["train"].select(range(5000)) 
-                else:
-                    self.data = squad["validation"].select(range(100))
-                self.tokenizer = tokenizer
-                self.max_length = max_length
-                self.samples = self._preprocess()
+    def preprocess_dataset(self, subsample_size=5000, seed=101):
+        dataset = load_dataset("squad")
+        # Subsample for speed
+        dataset["train"] = dataset["train"].shuffle(seed=seed).select(range(subsample_size))
+        dataset["validation"] = dataset["validation"].shuffle(seed=seed).select(range(subsample_size // 10))
 
-            def _preprocess(self):
-                samples = []
-                for item in self.data:
-                    text = f"question: {item['question']} context: {item['context']} answer: {item['answers']['text'][0] if item['answers']['text'] else ''}"
-                    tokens = self.tokenizer.encode(text, max_length=self.max_length, truncation=True, padding="max_length")
-                    samples.append(tokens)
-                return samples
+        def preprocess(example):
+            example["input_text"] = "Question: " + example["question"] + " Context: " + example["context"]
+            example["target_text"] = example["answers"]["text"][0] if len(example["answers"]["text"]) > 0 else ""
+            return example
 
-            def __len__(self):
-                return len(self.samples)
+        dataset = dataset.map(preprocess)
 
-            def __getitem__(self, idx):
-                x = torch.tensor(self.samples[idx][:-1], dtype=torch.long)
-                y = torch.tensor(self.samples[idx][1:], dtype=torch.long)
-                return x, y
-
-        # Tokenizer
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
         self.tokenizer.pad_token = self.tokenizer.eos_token
+        self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
 
-        # Train loader
-        train_dataset = SquadTextDataset(self.tokenizer, split="train", max_length=512)
-        self.train_loader = DataLoader(train_dataset, batch_size=2, shuffle=True)
+        def tokenize(example):
+            # Concatenate input and target for input_ids
+            input_text = example["input_text"]
+            target_text = example["target_text"]
+            full_text = input_text + self.tokenizer.eos_token + target_text + self.tokenizer.eos_token
+            tokenized = self.tokenizer(
+                full_text,
+                max_length=self.max_length,
+                truncation=True,
+                padding="max_length"
+            )
+            # Find split point
+            input_ids_input = self.tokenizer(
+                input_text + self.tokenizer.eos_token,
+                max_length=self.max_length,
+                truncation=True,
+                padding="max_length"
+            )["input_ids"]
+            input_len = sum([1 for t in input_ids_input if t != self.tokenizer.pad_token_id])
+            # Mask out input tokens in labels
+            labels = [-100] * input_len + tokenized["input_ids"][input_len:]
+            # For padding after full_text, also mask as -100
+            pad_start = len(labels)
+            if pad_start < self.max_length:
+                labels += [-100] * (self.max_length - pad_start)
+            tokenized["labels"] = labels[:self.max_length]
+            return {
+                "input_ids": tokenized["input_ids"],
+                "labels": tokenized["labels"],
+                "attention_mask": tokenized["attention_mask"]
+            }
 
-        # Validation loader
-        val_dataset = SquadTextDataset(self.tokenizer, split="validation", max_length=512)
-        self.val_loader = DataLoader(val_dataset, batch_size=2, shuffle=True)
+        dataset = dataset.map(tokenize, batched=False, remove_columns=dataset["train"].column_names)
+
+        self.train_loader = DataLoader(
+            dataset["train"],
+            batch_size=self.train_batch_size,
+            shuffle=True,
+            collate_fn=default_data_collator
+        )
+        self.val_loader = DataLoader(
+            dataset["validation"],
+            batch_size=self.eval_batch_size,
+            collate_fn=default_data_collator
+        )
 
     def init_model(self):
         # HuggingFace authentication check
@@ -134,9 +157,11 @@ class FlashDPModel:
         model_device = next(self.model.parameters()).device
         for epoch in range(self.num_epochs):
             total_loss = 0
-            for x, y in self.train_loader:
-                x, y = x.to(model_device), y.to(model_device)
-                outputs = self.model(input_ids=x, labels=y)
+            for batch in self.train_loader:
+                input_ids = batch["input_ids"].to(model_device)
+                labels = batch["labels"].to(model_device)
+                attention_mask = batch["attention_mask"].to(model_device) if "attention_mask" in batch else None
+                outputs = self.model(input_ids=input_ids, labels=labels, attention_mask=attention_mask)
                 loss = outputs.loss
                 loss.backward()
                 self.optimizer.step()
