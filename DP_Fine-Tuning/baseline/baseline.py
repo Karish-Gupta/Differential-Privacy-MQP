@@ -22,7 +22,7 @@ class BasicLoRAModel:
         num_epochs,
         learning_rate,
         max_length,
-        lora_r=8,
+        lora_r=16,
         lora_alpha=32,
         lora_dropout=0.05,
         lora_target_modules=None,
@@ -160,6 +160,13 @@ class BasicLoRAModel:
             self.tokenizer,
             max_gen_length=30,
         )
+        evaluate_f1(
+            self.model,
+            self.val_loader,
+            model_device,
+            self.tokenizer,
+            max_gen_length=30,
+        )
 
 
 if __name__ == "__main__":
@@ -167,9 +174,9 @@ if __name__ == "__main__":
     model_name = "mlabonne/Meta-Llama-3-8B"
     train_batch_size = 2
     eval_batch_size = 2
-    num_epochs = 1
-    learning_rate = 1e-5
-    max_length = 128
+    num_epochs = 3
+    learning_rate = 2e-4
+    max_length = 512
 
     # LoRA configs
     lora_r = 16
