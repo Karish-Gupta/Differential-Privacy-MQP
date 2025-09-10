@@ -6,7 +6,7 @@ from torch.utils.data import DataLoader
 from transformers import AutoModelForCausalLM, AutoTokenizer, default_data_collator
 from datasets import load_dataset
 from fastDP import PrivacyEngine
-from utils import evaluate_exact_match
+from utils import evaluate_exact_match, evaluate_f1
 from huggingface_hub import login
 import os
 
@@ -206,6 +206,13 @@ class FastDPModel:
          self.tokenizer,
          max_gen_length=30,
       )
+      evaluate_f1(
+         self.model,
+         self.val_loader,
+         model_device,
+         self.tokenizer,
+         max_gen_length=30,
+      )
 
 
 
@@ -240,7 +247,7 @@ if __name__ == "__main__":
          target_epsilon=target_epsilon,
    )
 
-   fastdp.preprocess_dataset(subsample_size=2500, seed=101)
+   fastdp.preprocess_dataset(subsample_size=5000, seed=101)
    fastdp.init_model()
    fastdp.train()
    fastdp.evaluate()
