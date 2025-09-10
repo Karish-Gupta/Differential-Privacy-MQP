@@ -205,7 +205,7 @@ if __name__ == "__main__":
     train_batch_size = 2
     eval_batch_size = 2
     num_epochs = 3
-    learning_rate = 1e-5
+    learning_rate = 1e-4
     max_length = 512
     dp_c = 1.0
     dp_noise = 1.0
