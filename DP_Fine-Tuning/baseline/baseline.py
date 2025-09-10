@@ -46,54 +46,25 @@ class BasicLoRAModel:
         self.lora_target_modules = lora_target_modules
         self.lora_bias = lora_bias
 
-    def preprocess_dataset(self):
-        class SquadTextDataset(Dataset):
-            def __init__(self, tokenizer, split="train", max_length=128):
-                squad = load_dataset("squad")
-                if split == "train":
-                    self.data = squad["train"].select(range(2500))
-                else:
-                    self.data = squad["validation"].select(range(50))
-                self.tokenizer = tokenizer
-                self.max_length = max_length
-                self.samples = self._preprocess()
+    def preprocess_dataset(self, subsample_size, seed=42):
+      dataset = load_dataset(self.dataset_name)
 
-            def _preprocess(self):
-                samples = []
-                for item in self.data:
-                    text = f"question: {item['question']} context: {item['context']} answer: {item['answers']['text'][0] if item['answers']['text'] else ''}"
-                    tokens = self.tokenizer.encode(
-                        text,
-                        max_length=self.max_length,
-                        truncation=True,
-                        padding="max_length",
-                    )
-                    samples.append(tokens)
-                return samples
+      if subsample_size is not None:
+         # Shuffle first to avoid always taking the same top slice
+         dataset["train"] = dataset["train"].shuffle(seed=seed).select(range(subsample_size))
+         dataset["validation"] = dataset["validation"].shuffle(seed=seed).select(range(subsample_size // 10)) 
 
-            def __len__(self):
-                return len(self.samples)
+      def preprocess(example):
+         example["input_text"] = "Question: " + example["question"] + " Context: " + example["context"]
+         example["target_text"] = example["answers"]["text"][0] if len(example["answers"]["text"]) > 0 else ""
+         return example
 
-            def __getitem__(self, idx):
-                x = torch.tensor(self.samples[idx][:-1], dtype=torch.long)
-                y = torch.tensor(self.samples[idx][1:], dtype=torch.long)
-                return x, y
+      dataset = dataset.map(preprocess)
 
-        # Tokenizer
-        self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
-        self.tokenizer.pad_token = self.tokenizer.eos_token
-
-        # Train loader
-        train_dataset = SquadTextDataset(
-            self.tokenizer, split="train", max_length=self.max_length
-        )
-        self.train_loader = DataLoader(train_dataset, batch_size=self.train_batch_size, shuffle=True)
-
-        # Validation loader
-        val_dataset = SquadTextDataset(
-            self.tokenizer, split="validation", max_length=self.max_length
-        )
-        self.val_loader = DataLoader(val_dataset, batch_size=self.eval_batch_size)
+      # Initialize tokenizer
+      self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
+      self.tokenizer.pad_token = self.tokenizer.eos_token
+      self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
 
     def init_model(self):
         # Load base model
