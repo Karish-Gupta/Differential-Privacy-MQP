@@ -174,7 +174,7 @@ if __name__ == "__main__":
         lora_target_modules=lora_target_modules,
         lora_bias=lora_bias,
     )
-    trainer.preprocess_dataset()
+    trainer.preprocess_dataset(subsample_size=5000, seed=101)
     trainer.init_model()
     trainer.train()
     trainer.evaluate()
