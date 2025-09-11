@@ -75,7 +75,8 @@ class FastDPModel:
 
       def preprocess(example):
          example["input_text"] = "Question: " + example["question"] + " Context: " + example["context"]
-         example["target_text"] = example["answers"]["text"][0] if len(example["answers"]["text"]) > 0 else ""
+         answer = example["answers"]["text"][0] if len(example["answers"]["text"]) > 0 else ""
+         example["target_text"] = "Answer: " + answer
          return example
 
       dataset = dataset.map(preprocess)
@@ -199,20 +200,6 @@ class FastDPModel:
          return
       model_device = next(self.model.parameters()).device
       print("Evaluating with Exact Match metric from utils.py...")
-      # evaluate_exact_match(
-      #    self.model,
-      #    self.val_loader,
-      #    model_device,
-      #    self.tokenizer,
-      #    max_gen_length=30,
-      # )
-      # evaluate_f1(
-      #    self.model,
-      #    self.val_loader,
-      #    model_device,
-      #    self.tokenizer,
-      #    max_gen_length=30,
-      # )
       evaluate_model(
          self.model,
          self.val_loader,
