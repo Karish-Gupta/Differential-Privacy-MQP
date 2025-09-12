@@ -76,7 +76,7 @@ class FastDPModel:
       def preprocess(example):
          example["input_text"] = "Context: " + example["context"] + " Question: " + example["question"]
          answer = example["answers"]["text"][0] if len(example["answers"]["text"]) > 0 else ""
-         example["target_text"] = "Answer: " + answer
+         example["target_text"] = answer
          return example
 
       dataset = dataset.map(preprocess)
