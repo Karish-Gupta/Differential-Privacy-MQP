@@ -44,14 +44,23 @@ def evaluate_model(model, val_loader, device, tokenizer, max_gen_length=50, show
         attention_mask = batch["attention_mask"].to(device)
 
         with torch.no_grad():
+            # For decoder-only models like Llama, we need to generate differently
             outputs = model.generate(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
                 max_new_tokens=max_gen_length,
+                pad_token_id=tokenizer.eos_token_id,  # Important for Llama
+                eos_token_id=tokenizer.eos_token_id,  # Important for Llama
+                do_sample=False,  # Use greedy decoding for consistency
+                temperature=1.0,
             )
-
+        
+        # For decoder models, the output includes the input + generated text
+        # We need to extract only the generated part
+        generated_ids = outputs[:, input_ids.shape[1]:]  # Take only the new tokens
+        
         # Decode and clean predictions
-        preds = [clean_text(p) for p in tokenizer.batch_decode(outputs, skip_special_tokens=True)]
+        preds = [clean_text(p) for p in tokenizer.batch_decode(generated_ids, skip_special_tokens=True)]
 
         # Decode and clean gold labels
         decoded_labels = []
@@ -60,6 +69,7 @@ def evaluate_model(model, val_loader, device, tokenizer, max_gen_length=50, show
             text = tokenizer.decode(label_ids, skip_special_tokens=True)
             decoded_labels.append(clean_text(text))
 
+        # Rest of your evaluation code remains the same...
         # Collect for F1
         all_preds.extend(preds)
         all_refs.extend(decoded_labels)

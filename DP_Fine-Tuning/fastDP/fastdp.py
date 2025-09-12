@@ -74,7 +74,7 @@ class FastDPModel:
          dataset["validation"] = dataset["validation"].shuffle(seed=seed).select(range(subsample_size // 10)) 
 
       def preprocess(example):
-         example["input_text"] = "Question: " + example["question"] + " Context: " + example["context"]
+         example["input_text"] = "Context: " + example["context"] + " Question: " + example["question"]
          answer = example["answers"]["text"][0] if len(example["answers"]["text"]) > 0 else ""
          example["target_text"] = "Answer: " + answer
          return example
