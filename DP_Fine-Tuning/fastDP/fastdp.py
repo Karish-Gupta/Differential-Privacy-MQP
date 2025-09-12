@@ -121,11 +121,8 @@ class FastDPModel:
 
 
    def init_model(self):
-      self.model = AutoModelForCausalLM.from_pretrained(
-         self.model_name,
-         torch_dtype=torch.float32,
-         device_map="cuda:0"
-      )
+      self.model = AutoModelForCausalLM.from_pretrained(self.model_name, device_map="cuda:0")
+      self.model = self.model.to(torch.float32)
       self.model.gradient_checkpointing_enable()
 
       target_modules = self.lora_target_modules or ["q_proj", "k_proj", "v_proj", "o_proj"]
