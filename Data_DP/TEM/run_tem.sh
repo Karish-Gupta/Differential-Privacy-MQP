@@ -25,10 +25,9 @@ pip install tqdm
 pip install scikit-learn
 pip install sentencepiece
 pip install accelerate
-pip install git+https://github.com/Kekkodf/pypantera.git
 
-python TEM_preprocess.py
-python testObfuscationIR.py \
+python TEM_Preprocess.py
+python pypantera/testObfuscationIR.py \
   --embPath ./TEM/glove.6B.300d.txt \
   --inputPath ./squad_for_pypantera.csv \
   --outputPath ./results/tem_eps1_beta0001/ \
