@@ -7,7 +7,7 @@ from torch.utils.data import DataLoader, Dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from transformers.utils import logging
 from datasets import load_dataset
-from utils import evaluate_exact_match, evaluate_f1  # Importing eval function from utils.py
+from utils import *  # Importing eval function from utils.py
 from peft import LoraConfig, get_peft_model, TaskType
 
 logging.set_verbosity_error()

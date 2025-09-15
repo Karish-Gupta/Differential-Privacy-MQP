@@ -25,6 +25,6 @@ pip install tqdm
 pip install scikit-learn
 pip install sentencepiece
 pip install accelerate
-pip install pypantera
+pip install git+https://github.com/Kekkodf/pypantera.git
 
 python tem.py

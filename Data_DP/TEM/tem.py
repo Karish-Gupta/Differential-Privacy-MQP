@@ -1,13 +1,15 @@
 # Training Llama3 with HuggingFace + LoRA + TEM (pypantera)
 import sys
 import os
+import urllib.request
+import zipfile
 
 import torch
 from torch.utils.data import DataLoader, Dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from transformers.utils import logging
 from datasets import load_dataset
-from utils import evaluate_exact_match, evaluate_f1  # Import eval functions
+from utils import *  # Import eval functions
 from peft import LoraConfig, get_peft_model, TaskType
 
 # pyPANTERA imports
@@ -63,6 +65,27 @@ class TEMModel:
         self.tem = None
         self.emb_loader = None
 
+    def download_glove_if_missing(self):
+        """Download GloVe embeddings if not present."""
+        target_file = self.embedding_path
+        if os.path.exists(target_file):
+            print(f"[INFO] GloVe embeddings already available at {target_file}")
+            return
+
+        os.makedirs(os.path.dirname(target_file), exist_ok=True)
+        zip_path = os.path.join(os.path.dirname(target_file), "glove.6B.zip")
+
+        if not os.path.exists(zip_path):
+            url = "https://nlp.stanford.edu/data/glove.6B.zip"
+            print(f"[INFO] Downloading GloVe embeddings from {url} ...")
+            urllib.request.urlretrieve(url, zip_path)
+            print("[INFO] Download complete.")
+
+        print("[INFO] Extracting GloVe embeddings...")
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            zf.extractall(os.path.dirname(target_file))
+        print("[INFO] Extraction complete.")
+
     def preprocess_dataset(self, subsample_size=None, seed=42):
         dataset = load_dataset(self.dataset_name)
 
@@ -80,6 +103,7 @@ class TEMModel:
 
         # Initialize TEM if needed
         if self.do_privacy:
+            self.download_glove_if_missing()
             print("Initializing TEM privacy mechanism...")
             self.emb_loader = EmbeddingLoader("glove", dim=300, path=self.embedding_path)
             self.tem = TEM(
@@ -238,7 +262,7 @@ if __name__ == "__main__":
     do_privacy = True
     privacy_epsilon = 1.0
     privacy_beta = 0.5
-    embedding_path = "/path/to/glove.6B.300d.txt"  # update this path
+    embedding_path = "/glove/glove.6B.300d.txt"  # update this path
 
     if torch.cuda.device_count() == 0:
         print("ERROR: CUDA GPU required.")
