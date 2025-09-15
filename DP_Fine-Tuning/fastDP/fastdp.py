@@ -30,7 +30,7 @@ class FastDPModel:
       target_epsilon,
 
       lora_r=16,
-      lora_alpha=32,
+      lora_alpha=16,
       lora_dropout=0.05,
       lora_target_modules=None,   # if None, good defaults for LLaMA/Mistral-family are used
       lora_bias="none",           # "none" | "lora_only" | "all"
@@ -122,7 +122,7 @@ class FastDPModel:
 
    def init_model(self):
       self.model = AutoModelForCausalLM.from_pretrained(self.model_name, device_map="cuda:0")
-      self.model = self.model.to(torch.float32)
+      self.model = self.model.to(torch.float16)
       self.model.gradient_checkpointing_enable()
 
       target_modules = self.lora_target_modules or ["q_proj", "k_proj", "v_proj", "o_proj"]
@@ -212,10 +212,10 @@ if __name__ == "__main__":
    # Model Configs
    model_name = "meta-llama/Meta-Llama-3-8B-Instruct"
    dataset_name = "rajpurkar/squad"
-   train_batch_size = 2
-   eval_batch_size = 2
+   train_batch_size = 1
+   eval_batch_size = 1
    gradient_accumulation_steps = 8
-   num_epochs = 3
+   num_epochs = 5
    learning_rate = 2e-4
    max_input_length = 512
    max_target_length = 512
@@ -235,7 +235,10 @@ if __name__ == "__main__":
          target_epsilon=target_epsilon,
    )
 
-   fastdp.preprocess_dataset(subsample_size=5000, seed=101)
+   # Start GPU utilization logging using utils
+   gpu_util_thread, gpu_util_stop_event, gpu_util_data = start_gpu_utilization_logging(interval=1.0)
+
+   fastdp.preprocess_dataset(subsample_size=2500, seed=101)
    fastdp.init_model()
    fastdp.train()
    
@@ -243,3 +246,7 @@ if __name__ == "__main__":
    print(f"On device: {device}")
    print(f"Target epsilon: {target_epsilon}")
    fastdp.evaluate()
+
+   # Ouput GPU logging
+   stop_gpu_utilization_logging(gpu_util_thread, gpu_util_stop_event)
+   print_gpu_utilization_summary(gpu_util_data)

@@ -54,12 +54,22 @@ def evaluate_model(model, val_loader, device, tokenizer, max_gen_length=50, show
                 temperature=0,
             )
         
-        # For decoder models, the output includes the input + generated text
-        # We need to extract only the generated part
-        generated_ids = outputs[:, input_ids.shape[1]:]  # Take only the new tokens
+        preds = tokenizer.batch_decode(outputs, skip_special_tokens=True)
         
-        # Decode and clean predictions
-        preds = [p for p in tokenizer.batch_decode(generated_ids, skip_special_tokens=True)]
+        # Remove the input text from predictions to get only the generated answer
+        cleaned_preds = []
+        for i, pred in enumerate(preds):
+            # Get the original input text
+            original_input = tokenizer.decode(input_ids[i], skip_special_tokens=True)
+            
+            # Remove the input part from prediction
+            if pred.startswith(original_input):
+                generated_part = pred[len(original_input):].strip()
+            else:
+                # Fallback: if the input isn't at the start, take the whole prediction
+                generated_part = pred.strip()
+            
+            cleaned_preds.append(generated_part)
 
         # Decode and clean gold labels
         decoded_labels = []
@@ -67,6 +77,17 @@ def evaluate_model(model, val_loader, device, tokenizer, max_gen_length=50, show
             label_ids = [l for l in label_ids.tolist() if l != -100]
             text = tokenizer.decode(label_ids, skip_special_tokens=True)
             decoded_labels.append(text)
+
+        # Debug: Print some examples to see what's happening
+        if len(all_preds) == 0:  # Only print for first batch
+            print("\nDEBUG - First batch examples:")
+            for i in range(min(3, len(cleaned_preds))):
+                print(f"Input: {tokenizer.decode(input_ids[i], skip_special_tokens=True)}")
+                print(f"Full output: {preds[i]}")
+                print(f"Cleaned pred: {cleaned_preds[i]}")
+                print(f"Gold: {decoded_labels[i]}")
+                print("---")
+
 
         # Collect for F1
         all_preds.extend(preds)
@@ -123,7 +144,7 @@ def evaluate_model(model, val_loader, device, tokenizer, max_gen_length=50, show
         "f1": f1
     }
     
-    def start_gpu_utilization_logging(logfile="gpu_utilization_debug.csv", interval=1.0, util_data=None, stop_event=None):
+def start_gpu_utilization_logging(logfile="gpu_utilization_debug.csv", interval=1.0, util_data=None, stop_event=None):
     """
     Start a background thread to log GPU utilization every `interval` seconds.
     Returns (thread, stop_event, util_data).
