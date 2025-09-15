@@ -277,7 +277,6 @@ if __name__ == "__main__":
         print("Please run this script on a machine with a CUDA GPU and the correct CUDA drivers installed.")
         sys.exit(1)
     print(f"Using {torch.cuda.device_count()} GPU(s).")
-    print_gpu_utilization()  # Print initial GPU utilization
 
     flashdp = FlashDPModel(
         model_name=model_name,
@@ -296,6 +295,8 @@ if __name__ == "__main__":
         lora_target_modules=lora_target_modules,
         lora_bias=lora_bias,
     )
+    flashdp.print_gpu_utilization()  # Print initial GPU utilization
+
     flashdp.preprocess_dataset()
     flashdp.init_model()
     flashdp.train()
