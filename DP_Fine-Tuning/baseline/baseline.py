@@ -49,24 +49,52 @@ class BasicLoRAModel:
         self.lora_bias = lora_bias
 
     def preprocess_dataset(self, subsample_size, seed=42):
-      dataset = load_dataset(self.dataset_name)
+        dataset = load_dataset(self.dataset_name)
 
-      if subsample_size is not None:
-         # Shuffle first to avoid always taking the same top slice
-         dataset["train"] = dataset["train"].shuffle(seed=seed).select(range(subsample_size))
-         dataset["validation"] = dataset["validation"].shuffle(seed=seed).select(range(subsample_size // 10)) 
+        if subsample_size is not None:
+            # Shuffle first to avoid always taking the same top slice
+            dataset["train"] = dataset["train"].shuffle(seed=seed).select(range(subsample_size))
+            dataset["validation"] = dataset["validation"].shuffle(seed=seed).select(range(subsample_size // 10)) 
 
-      def preprocess(example):
-         example["input_text"] = "Question: " + example["question"] + " Context: " + example["context"]
-         example["target_text"] = example["answers"]["text"][0] if len(example["answers"]["text"]) > 0 else ""
-         return example
+        def preprocess(example):
+            example["input_text"] = "Question: " + example["question"] + " Context: " + example["context"]
+            example["target_text"] = example["answers"]["text"][0] if len(example["answers"]["text"]) > 0 else ""
+            return example
 
-      dataset = dataset.map(preprocess)
+        dataset = dataset.map(preprocess)
 
       # Initialize tokenizer
-      self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
-      self.tokenizer.pad_token = self.tokenizer.eos_token
-      self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
+        self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
+        self.tokenizer.pad_token = self.tokenizer.eos_token
+        self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
+
+        def tokenize(batch):
+            inputs = self.tokenizer(
+                batch["input_text"],
+                max_length=self.max_length,
+                padding="max_length",
+                truncation=True,
+                return_tensors="pt",
+            )
+            labels = self.tokenizer(
+                batch["target_text"],
+                max_length=self.max_length,
+                padding="max_length",
+                truncation=True,
+                return_tensors="pt",
+            )
+            return {
+                "input_ids": inputs["input_ids"],
+                "attention_mask": inputs["attention_mask"],
+                "labels": labels["input_ids"],
+            }
+
+        tokenized_train = dataset["train"].map(tokenize, batched=True, remove_columns=dataset["train"].column_names)
+        tokenized_val = dataset["validation"].map(tokenize, batched=True, remove_columns=dataset["validation"].column_names)
+
+        self.train_loader = DataLoader(tokenized_train, batch_size=self.train_batch_size, shuffle=True)
+        self.val_loader = DataLoader(tokenized_val, batch_size=self.eval_batch_size)
+
 
     def init_model(self):
         # Load base model
@@ -182,3 +210,4 @@ if __name__ == "__main__":
     trainer.init_model()
     trainer.train()
     trainer.evaluate()
+         
