@@ -11,7 +11,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, default_data_colla
 from transformers.utils import logging
 from datasets import load_dataset
 from flashdp.api.wrap_model import wrap_with_flashdp_layers
-from utils import evaluate_exact_match, evaluate_f1  # Importing the eval functions from utils.py
+from utils import evaluate_exact_match, evaluate_f1, start_gpu_utilization_logging, stop_gpu_utilization_logging, print_gpu_utilization_summary
 from peft import LoraConfig, get_peft_model, TaskType  # Added for LoRA
 
 logging.set_verbosity_error()
@@ -26,7 +26,9 @@ class FlashDPModel:
         learning_rate,
         max_length,
         dp_c,
-        dp_noise,
+        dp_noise=None,
+        target_epsilon=8.0,
+        target_delta=1e-5,
         lora_r=16,
         lora_alpha=32,
         lora_dropout=0.05,
@@ -40,6 +42,8 @@ class FlashDPModel:
         self.learning_rate = learning_rate
         self.max_length = max_length
         self.dp_c = dp_c
+        self.target_epsilon = target_epsilon
+        self.target_delta = target_delta
         self.dp_noise = dp_noise
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.tokenizer = None
@@ -55,9 +59,9 @@ class FlashDPModel:
 
     def preprocess_dataset(self, subsample_size=5000, seed=101):
         dataset = load_dataset("squad")
-        # Subsample for speed
+        # Subsample for speed   
         dataset["train"] = dataset["train"].shuffle(seed=seed).select(range(subsample_size))
-        dataset["validation"] = dataset["validation"].shuffle(seed=seed).select(range(subsample_size // 10))
+        dataset["validation"] = dataset["validation"].shuffle(seed=seed).select(range(subsample_size // 50))
 
         def preprocess(example):
             example["input_text"] = "Question: " + example["question"] + " Context: " + example["context"]
@@ -116,6 +120,23 @@ class FlashDPModel:
             collate_fn=default_data_collator
         )
 
+    def estimate_noise_multiplier(self, target_epsilon, target_delta, epochs, batch_size, dataset_size):
+        """
+        Basic privacy accountant for the Gaussian mechanism (approximate, not tight):
+        Returns the noise multiplier (sigma) for a given epsilon, delta, epochs, batch_size, dataset_size.
+        """
+        # This is a very rough approximation for demonstration purposes only!
+        # For real applications, use a library like Opacus or the official accountant from FlashDP.
+        import math
+        steps = int(epochs * (dataset_size // batch_size))
+        q = batch_size / dataset_size
+        # Analytical Gaussian Mechanism (simplified):
+        # sigma >= q * sqrt(2 * steps * log(1/delta)) / epsilon
+        if target_epsilon is None or target_delta is None:
+            return 1.0
+        sigma = (q * math.sqrt(2 * steps * math.log(1/target_delta))) / target_epsilon
+        return sigma
+
     def init_model(self):
         # HuggingFace authentication check
         from transformers import pipeline
@@ -128,7 +149,21 @@ class FlashDPModel:
             sys.exit(1)
         self.model = AutoModelForCausalLM.from_pretrained(self.model_name, device_map="auto")
         self.model = self.model.to(torch.float32)
+        # Print model device map for verification
+        if hasattr(self.model, 'hf_device_map'):
+            print("[Device Map] Model loaded with device map:")
+            print(self.model.hf_device_map)
         # DP wrapping (before LoRA)
+        # If dp_noise is not set, estimate it from target_epsilon
+        if self.dp_noise is None and self.target_epsilon is not None:
+            self.dp_noise = self.estimate_noise_multiplier(
+                target_epsilon=self.target_epsilon,
+                target_delta=self.target_delta,
+                epochs=self.num_epochs,
+                batch_size=self.train_batch_size,
+                dataset_size=len(self.train_loader.dataset)
+            )
+            print(f"[FlashDP] Estimated noise_multiplier for target_epsilon={self.target_epsilon}: {self.dp_noise}")
         self.model = wrap_with_flashdp_layers(
             self.model,
             target_modules=[torch.nn.Linear],
@@ -137,7 +172,7 @@ class FlashDPModel:
             noise_multiplier=self.dp_noise
         )
         # LoRA config (after FlashDP)
-        target_modules = self.lora_target_modules or ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+        target_modules = self.lora_target_modules or ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"] # Try to modify this, remove last 3??
         peft_config = LoraConfig(
             task_type=TaskType.CAUSAL_LM,
             r=self.lora_r,
@@ -200,7 +235,10 @@ class FlashDPModel:
         )
 
 if __name__ == "__main__":
+
     # Configs
+    target_epsilon = 8.0  # Set desired epsilon 
+    target_delta = 1e-5   # Set desired delta 
     model_name = "mlabonne/Meta-Llama-3-8B"
     train_batch_size = 2
     eval_batch_size = 2
@@ -208,8 +246,8 @@ if __name__ == "__main__":
     learning_rate = 1e-4
     max_length = 512
     dp_c = 1.0
-    dp_noise = 1.0
-    # LoRA configs
+    dp_noise = None  # Let the code compute noise_multiplier from target_epsilon
+    # LoRA configs                      
     lora_r = 16
     lora_alpha = 32
     lora_dropout = 0.05
@@ -231,13 +269,22 @@ if __name__ == "__main__":
         max_length=max_length,
         dp_c=dp_c,
         dp_noise=dp_noise,
+        target_epsilon=target_epsilon,
+        target_delta=target_delta,
         lora_r=lora_r,
         lora_alpha=lora_alpha,
         lora_dropout=lora_dropout,
         lora_target_modules=lora_target_modules,
         lora_bias=lora_bias,
     )
-    flashdp.preprocess_dataset()
-    flashdp.init_model()
-    flashdp.train()
-    flashdp.evaluate()
+    # Start GPU utilization logging using utils
+    gpu_util_thread, gpu_util_stop_event, gpu_util_data = start_gpu_utilization_logging(interval=1.0)
+
+    try:
+        flashdp.preprocess_dataset()
+        flashdp.init_model()
+        flashdp.train()
+        flashdp.evaluate()
+    finally:
+        stop_gpu_utilization_logging(gpu_util_thread, gpu_util_stop_event)
+        print_gpu_utilization_summary(gpu_util_data)
