@@ -1,17 +1,15 @@
-# Training Llama3 with HuggingFace + LoRA (no FlashDP)
 import sys
 import os
 
 import torch
-from torch.utils.data import DataLoader, Dataset
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from torch.utils.data import DataLoader
+from transformers import AutoModelForCausalLM, AutoTokenizer, default_data_collator
 from transformers.utils import logging
 from datasets import load_dataset
-from utils import *  # Importing eval function from utils.py
+from utils import evaluate_exact_match, evaluate_f1
 from peft import LoraConfig, get_peft_model, TaskType
 
 logging.set_verbosity_error()
-
 
 class BasicLoRAModel:
     def __init__(
@@ -52,7 +50,6 @@ class BasicLoRAModel:
         dataset = load_dataset(self.dataset_name)
 
         if subsample_size is not None:
-            # Shuffle first to avoid always taking the same top slice
             dataset["train"] = dataset["train"].shuffle(seed=seed).select(range(subsample_size))
             dataset["validation"] = dataset["validation"].shuffle(seed=seed).select(range(subsample_size // 10)) 
 
@@ -63,45 +60,38 @@ class BasicLoRAModel:
 
         dataset = dataset.map(preprocess)
 
-      # Initialize tokenizer
+        # Initialize tokenizer
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
         self.tokenizer.pad_token = self.tokenizer.eos_token
         self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
 
-        def tokenize(batch):
-            inputs = self.tokenizer(
-                batch["input_text"],
+        def tokenize(example):
+            model_inputs = self.tokenizer(
+                example["input_text"],
                 max_length=self.max_length,
-                padding="max_length",
                 truncation=True,
-                return_tensors="pt",
+                padding="max_length"
             )
             labels = self.tokenizer(
-                batch["target_text"],
+                example["target_text"],
                 max_length=self.max_length,
-                padding="max_length",
                 truncation=True,
-                return_tensors="pt",
+                padding="max_length"
             )
-            return {
-                "input_ids": inputs["input_ids"],
-                "attention_mask": inputs["attention_mask"],
-                "labels": labels["input_ids"],
-            }
+            labels["input_ids"] = [(l if l != self.tokenizer.pad_token_id else -100) for l in labels["input_ids"]]
+            model_inputs["labels"] = labels["input_ids"]
+            return model_inputs
 
         tokenized_train = dataset["train"].map(tokenize, batched=True, remove_columns=dataset["train"].column_names)
         tokenized_val = dataset["validation"].map(tokenize, batched=True, remove_columns=dataset["validation"].column_names)
 
-        self.train_loader = DataLoader(tokenized_train, batch_size=self.train_batch_size, shuffle=True)
-        self.val_loader = DataLoader(tokenized_val, batch_size=self.eval_batch_size)
-
+        self.train_loader = DataLoader(tokenized_train, batch_size=self.train_batch_size, shuffle=True, collate_fn=default_data_collator)
+        self.val_loader = DataLoader(tokenized_val, batch_size=self.eval_batch_size, collate_fn=default_data_collator)
 
     def init_model(self):
-        # Load base model
         self.model = AutoModelForCausalLM.from_pretrained(self.model_name, device_map="auto")
         self.model = self.model.to(torch.float32)
 
-        # LoRA config
         target_modules = self.lora_target_modules or [
             "q_proj",
             "k_proj",
@@ -122,27 +112,30 @@ class BasicLoRAModel:
         self.model = get_peft_model(self.model, peft_config)
         self.model.print_trainable_parameters()
 
-        # Optimizer
         trainable_params = (p for p in self.model.parameters() if p.requires_grad)
         self.optimizer = torch.optim.AdamW(trainable_params, lr=self.learning_rate)
 
     def train(self):
         self.model.train()
-        model_device = next(self.model.parameters()).device
         for epoch in range(self.num_epochs):
-            total_loss = 0
-            for x, y in self.train_loader:
-                x, y = x.to(model_device), y.to(model_device)
-                outputs = self.model(input_ids=x, labels=y)
+            running_loss = 0.0
+            for step, batch in enumerate(self.train_loader):
+                input_ids = batch["input_ids"].to(self.device)
+                attention_mask = batch["attention_mask"].to(self.device)
+                labels = batch["labels"].to(self.device)
+
+                outputs = self.model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
                 loss = outputs.loss
                 loss.backward()
                 self.optimizer.step()
                 self.optimizer.zero_grad()
-                total_loss += loss.item()
-            avg_loss = total_loss / len(self.train_loader)
-            print(f"Epoch {epoch+1}, Loss: {avg_loss:.4f}")
+                running_loss += loss.item()
+                if step % 50 == 0:
+                    print(f"Epoch {epoch+1}, Step {step}, Loss {running_loss / (step+1):.4f}")
 
-        # Save LoRA adapters only
+            avg_loss = running_loss / len(self.train_loader)
+            print(f"Epoch {epoch+1}, Avg Loss: {avg_loss:.4f}")
+
         adapter_dir = "./llama3-8b-lora"
         self.model.save_pretrained(adapter_dir)
         if self.tokenizer:
@@ -169,9 +162,7 @@ class BasicLoRAModel:
             max_gen_length=30,
         )
 
-
 if __name__ == "__main__":
-    # Configs
     model_name = "mlabonne/Meta-Llama-3-8B"
     dataset_name = "rajpurkar/squad"
     train_batch_size = 2
@@ -180,7 +171,6 @@ if __name__ == "__main__":
     learning_rate = 2e-4
     max_length = 512
 
-    # LoRA configs
     lora_r = 16
     lora_alpha = 32
     lora_dropout = 0.05
@@ -210,4 +200,3 @@ if __name__ == "__main__":
     trainer.init_model()
     trainer.train()
     trainer.evaluate()
-         
