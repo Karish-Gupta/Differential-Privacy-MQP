@@ -27,4 +27,13 @@ pip install sentencepiece
 pip install accelerate
 pip install git+https://github.com/Kekkodf/pypantera.git
 
-python tem.py
+python TEM_preprocess.py
+python testObfuscationIR.py \
+  --embPath /home/malex/glove/glove.6B.300d.txt \
+  --inputPath /full/path/to/squad_for_pypantera.csv \
+  --outputPath ./results/ir/tem_eps1_beta0001/ \
+  --mechanism TEM \
+  --epsilon 1.0 \
+  --beta 0.001 \
+  --task retrieval \
+  --numberOfObfuscations 1\
