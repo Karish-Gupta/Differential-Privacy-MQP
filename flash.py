@@ -13,6 +13,8 @@ from datasets import load_dataset
 from flashdp.api.wrap_model import wrap_with_flashdp_layers
 from utils import evaluate_exact_match, evaluate_f1  # Importing the eval functions from utils.py
 from peft import LoraConfig, get_peft_model, TaskType  # Added for LoRA
+import subprocess  # Add this import
+
 
 logging.set_verbosity_error()
 
@@ -26,7 +28,9 @@ class FlashDPModel:
         learning_rate,
         max_length,
         dp_c,
-        dp_noise,
+        dp_noise=None,
+        target_epsilon=8.0,
+        target_delta=1e-5,
         lora_r=16,
         lora_alpha=32,
         lora_dropout=0.05,
@@ -40,6 +44,8 @@ class FlashDPModel:
         self.learning_rate = learning_rate
         self.max_length = max_length
         self.dp_c = dp_c
+        self.target_epsilon = target_epsilon
+        self.target_delta = target_delta
         self.dp_noise = dp_noise
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.tokenizer = None
@@ -116,6 +122,23 @@ class FlashDPModel:
             collate_fn=default_data_collator
         )
 
+    def estimate_noise_multiplier(self, target_epsilon, target_delta, epochs, batch_size, dataset_size):
+        """
+        Basic privacy accountant for the Gaussian mechanism (approximate, not tight):
+        Returns the noise multiplier (sigma) for a given epsilon, delta, epochs, batch_size, dataset_size.
+        """
+        # This is a very rough approximation for demonstration purposes only!
+        # For real applications, use a library like Opacus or the official accountant from FlashDP.
+        import math
+        steps = int(epochs * (dataset_size // batch_size))
+        q = batch_size / dataset_size
+        # Analytical Gaussian Mechanism (simplified):
+        # sigma >= q * sqrt(2 * steps * log(1/delta)) / epsilon
+        if target_epsilon is None or target_delta is None:
+            return 1.0
+        sigma = (q * math.sqrt(2 * steps * math.log(1/target_delta))) / target_epsilon
+        return sigma
+
     def init_model(self):
         # HuggingFace authentication check
         from transformers import pipeline
@@ -128,7 +151,22 @@ class FlashDPModel:
             sys.exit(1)
         self.model = AutoModelForCausalLM.from_pretrained(self.model_name, device_map="auto")
         self.model = self.model.to(torch.float32)
+        # Print model device map for verification
+        if hasattr(self.model, 'hf_device_map'):
+            print("[Device Map] Model loaded with device map:")
+            print(self.model.hf_device_map)
+        self.print_gpu_utilization()  # Print GPU utilization after model load
         # DP wrapping (before LoRA)
+        # If dp_noise is not set, estimate it from target_epsilon
+        if self.dp_noise is None and self.target_epsilon is not None:
+            self.dp_noise = self.estimate_noise_multiplier(
+                target_epsilon=self.target_epsilon,
+                target_delta=self.target_delta,
+                epochs=self.num_epochs,
+                batch_size=self.train_batch_size,
+                dataset_size=len(self.train_loader.dataset)
+            )
+            print(f"[FlashDP] Estimated noise_multiplier for target_epsilon={self.target_epsilon}: {self.dp_noise}")
         self.model = wrap_with_flashdp_layers(
             self.model,
             target_modules=[torch.nn.Linear],
@@ -137,7 +175,7 @@ class FlashDPModel:
             noise_multiplier=self.dp_noise
         )
         # LoRA config (after FlashDP)
-        target_modules = self.lora_target_modules or ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+        target_modules = self.lora_target_modules or ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"] # Try to modify this, remove last 3??
         peft_config = LoraConfig(
             task_type=TaskType.CAUSAL_LM,
             r=self.lora_r,
@@ -169,6 +207,7 @@ class FlashDPModel:
                 total_loss += loss.item()
             avg_loss = total_loss / len(self.train_loader)
             print(f"Epoch {epoch+1}, Loss: {avg_loss:.4f}")
+            self.print_gpu_utilization()  # Print GPU utilization after each epoch
         print(f"DP Training completed with noise_multiplier={self.dp_noise}, C={self.dp_c}, epochs={self.num_epochs}, batch_size={self.train_batch_size}")
         # Save LoRA adapters only
         adapter_dir = "./llama3-8b-flashdp-lora"
@@ -199,8 +238,25 @@ class FlashDPModel:
             max_gen_length=30
         )
 
+    def print_gpu_utilization(self):
+        try:
+            result = subprocess.run(
+                ["nvidia-smi", "--query-gpu=index,name,utilization.gpu,memory.used,memory.total", "--format=csv,noheader,nounits"],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True, text=True
+            )
+            print("\n[GPU UTILIZATION]")
+            for line in result.stdout.strip().split('\n'):
+                idx, name, util, mem_used, mem_total = [x.strip() for x in line.split(',')]
+                print(f"GPU {idx} ({name}): Utilization {util}% | Memory {mem_used} MiB / {mem_total} MiB")
+            print()
+        except Exception as e:
+            print(f"Could not query GPU utilization: {e}")
+
 if __name__ == "__main__":
+
     # Configs
+    target_epsilon = 8.0  # Set desired epsilon 
+    target_delta = 1e-5   # Set desired delta 
     model_name = "mlabonne/Meta-Llama-3-8B"
     train_batch_size = 2
     eval_batch_size = 2
@@ -208,8 +264,8 @@ if __name__ == "__main__":
     learning_rate = 1e-4
     max_length = 512
     dp_c = 1.0
-    dp_noise = 1.0
-    # LoRA configs
+    dp_noise = None  # Let the code compute noise_multiplier from target_epsilon
+    # LoRA configs                      
     lora_r = 16
     lora_alpha = 32
     lora_dropout = 0.05
@@ -221,6 +277,7 @@ if __name__ == "__main__":
         print("Please run this script on a machine with a CUDA GPU and the correct CUDA drivers installed.")
         sys.exit(1)
     print(f"Using {torch.cuda.device_count()} GPU(s).")
+    print_gpu_utilization()  # Print initial GPU utilization
 
     flashdp = FlashDPModel(
         model_name=model_name,
@@ -231,6 +288,8 @@ if __name__ == "__main__":
         max_length=max_length,
         dp_c=dp_c,
         dp_noise=dp_noise,
+        target_epsilon=target_epsilon,
+        target_delta=target_delta,
         lora_r=lora_r,
         lora_alpha=lora_alpha,
         lora_dropout=lora_dropout,
