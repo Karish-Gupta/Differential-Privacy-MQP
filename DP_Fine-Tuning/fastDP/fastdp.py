@@ -6,7 +6,7 @@ from torch.utils.data import DataLoader
 from transformers import AutoModelForCausalLM, AutoTokenizer, default_data_collator
 from datasets import load_dataset
 from fastDP import PrivacyEngine
-from utils import evaluate_exact_match, evaluate_f1
+from utils import *
 from huggingface_hub import login
 import os
 
@@ -74,8 +74,9 @@ class FastDPModel:
          dataset["validation"] = dataset["validation"].shuffle(seed=seed).select(range(subsample_size // 10)) 
 
       def preprocess(example):
-         example["input_text"] = "Question: " + example["question"] + " Context: " + example["context"]
-         example["target_text"] = example["answers"]["text"][0] if len(example["answers"]["text"]) > 0 else ""
+         example["input_text"] = "Context: " + example["context"] + " Question: " + example["question"]
+         answer = example["answers"]["text"][0] if len(example["answers"]["text"]) > 0 else ""
+         example["target_text"] = answer
          return example
 
       dataset = dataset.map(preprocess)
@@ -120,11 +121,8 @@ class FastDPModel:
 
 
    def init_model(self):
-      self.model = AutoModelForCausalLM.from_pretrained(
-         self.model_name,
-         torch_dtype=torch.float32,
-         device_map="cuda:0"
-      )
+      self.model = AutoModelForCausalLM.from_pretrained(self.model_name, device_map="cuda:0")
+      self.model = self.model.to(torch.float32)
       self.model.gradient_checkpointing_enable()
 
       target_modules = self.lora_target_modules or ["q_proj", "k_proj", "v_proj", "o_proj"]
@@ -199,19 +197,13 @@ class FastDPModel:
          return
       model_device = next(self.model.parameters()).device
       print("Evaluating with Exact Match metric from utils.py...")
-      evaluate_exact_match(
+      evaluate_model(
          self.model,
          self.val_loader,
          model_device,
          self.tokenizer,
          max_gen_length=30,
-      )
-      evaluate_f1(
-         self.model,
-         self.val_loader,
-         model_device,
-         self.tokenizer,
-         max_gen_length=30,
+         show_samples=10
       )
 
 
@@ -230,10 +222,6 @@ if __name__ == "__main__":
    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
    target_epsilon = 8.0
 
-   print(f"Model: {model_name}")
-   print(f"On device: {device}")
-   print(f"Target epsilon: {target_epsilon}")
-
    fastdp = FastDPModel(
          model_name=model_name,
          dataset_name=dataset_name,
@@ -250,4 +238,8 @@ if __name__ == "__main__":
    fastdp.preprocess_dataset(subsample_size=5000, seed=101)
    fastdp.init_model()
    fastdp.train()
+   
+   print(f"Model: {model_name}")
+   print(f"On device: {device}")
+   print(f"Target epsilon: {target_epsilon}")
    fastdp.evaluate()
