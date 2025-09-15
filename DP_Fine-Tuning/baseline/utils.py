@@ -21,19 +21,17 @@ def contains_token(pred, ref):
     return False
 
 
+# ...existing code...
+
 def evaluate_exact_match(model, val_loader, device, tokenizer, max_gen_length=50):
     model.eval()
     em_scores = []
 
     for batch in tqdm(val_loader, desc="Evaluating"):
-        # Unpack batch as (input_ids, labels)
-        input_ids, labels = batch
-        input_ids = input_ids.to(device)
-        labels = labels.to(device)
-        # Create attention_mask (all ones, same shape as input_ids)
-        attention_mask = torch.ones_like(input_ids)
+        input_ids = batch["input_ids"].to(device)
+        labels = batch["labels"].to(device)
+        attention_mask = batch["attention_mask"].to(device)
 
-        # Generate predictions
         with torch.no_grad():
             outputs = model.generate(
                 input_ids=input_ids,
@@ -43,18 +41,15 @@ def evaluate_exact_match(model, val_loader, device, tokenizer, max_gen_length=50
 
         preds = tokenizer.batch_decode(outputs, skip_special_tokens=True)
 
-        # Convert labels back to text (ignore -100 padding)
         decoded_labels = []
         for label_ids in labels:
             label_ids = [l for l in label_ids.tolist() if l != -100]
             text = tokenizer.decode(label_ids, skip_special_tokens=True)
             decoded_labels.append(text)
 
-        # Compare predictions to references
         for pred, ref in zip(preds, decoded_labels):
             pred_norm = pred.strip().lower()
             ref_norm = ref.strip().lower()
-
             em = 1 if contains_token(pred_norm, ref_norm) else 0
             em_scores.append(em)
 
@@ -62,17 +57,14 @@ def evaluate_exact_match(model, val_loader, device, tokenizer, max_gen_length=50
     print(f"Exact Match Accuracy: {exact_match:.4f}")
     return exact_match
 
-
-# Token-level F1 score (macro)
 def evaluate_f1(model, val_loader, device, tokenizer, max_gen_length=50):
     model.eval()
     all_preds = []
     all_refs = []
     for batch in tqdm(val_loader, desc="Evaluating F1"):
-        input_ids, labels = batch
-        input_ids = input_ids.to(device)
-        labels = labels.to(device)
-        attention_mask = torch.ones_like(input_ids)
+        input_ids = batch["input_ids"].to(device)
+        labels = batch["labels"].to(device)
+        attention_mask = batch["attention_mask"].to(device)
         with torch.no_grad():
             outputs = model.generate(
                 input_ids=input_ids,
@@ -87,10 +79,8 @@ def evaluate_f1(model, val_loader, device, tokenizer, max_gen_length=50):
             decoded_labels.append(text)
         all_preds.extend(preds)
         all_refs.extend(decoded_labels)
-    # Token-level F1 (macro)
     pred_tokens = [p.strip().lower().split() for p in all_preds]
     ref_tokens = [r.strip().lower().split() for r in all_refs]
-    # Flatten for sklearn (binary F1 per token)
     y_true = []
     y_pred = []
     for ref, pred in zip(ref_tokens, pred_tokens):
@@ -103,3 +93,4 @@ def evaluate_f1(model, val_loader, device, tokenizer, max_gen_length=50):
     f1 = f1_score(y_true, y_pred)
     print(f"Token-level F1 Score: {f1:.4f}")
     return f1
+# ...existing code...

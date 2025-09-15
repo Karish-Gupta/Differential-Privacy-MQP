@@ -35,4 +35,4 @@ python pypantera/testObfuscationIR.py \
   --epsilon 1.0 \
   --beta 0.001 \
   --task retrieval \
-  --numberOfObfuscations 1\
+  --numberOfObfuscations 1
