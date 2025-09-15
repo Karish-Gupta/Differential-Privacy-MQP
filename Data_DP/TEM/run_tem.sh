@@ -7,7 +7,7 @@
 #SBATCH -e flashdp_run_%j.err         # name of the error file
 #SBATCH -p short                      # partition to submit to
 #SBATCH -t 03:00:00                   # time limit of 3 hours
-#SBATCH --gres=gpu:H200:1             # request 1 H200 GPU
+#SBATCH --gres=gpu:H100:1             # request 1 H200 GPU
 
 module load python/3.11.10
 module load cuda/12.4.0/3mdaov5
@@ -29,9 +29,9 @@ pip install git+https://github.com/Kekkodf/pypantera.git
 
 python TEM_preprocess.py
 python testObfuscationIR.py \
-  --embPath /home/malex/glove/glove.6B.300d.txt \
-  --inputPath /full/path/to/squad_for_pypantera.csv \
-  --outputPath ./results/ir/tem_eps1_beta0001/ \
+  --embPath ./TEM/glove.6B.300d.txt \
+  --inputPath ./squad_for_pypantera.csv \
+  --outputPath ./results/tem_eps1_beta0001/ \
   --mechanism TEM \
   --epsilon 1.0 \
   --beta 0.001 \
