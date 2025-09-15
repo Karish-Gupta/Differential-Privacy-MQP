@@ -17,6 +17,7 @@ class BasicLoRAModel:
     def __init__(
         self,
         model_name,
+        dataset_name,
         train_batch_size,
         eval_batch_size,
         num_epochs,
@@ -29,6 +30,7 @@ class BasicLoRAModel:
         lora_bias="none",
     ):
         self.model_name = model_name
+        self.dataset_name = dataset_name
         self.train_batch_size = train_batch_size
         self.eval_batch_size = eval_batch_size
         self.num_epochs = num_epochs
@@ -143,6 +145,7 @@ class BasicLoRAModel:
 if __name__ == "__main__":
     # Configs
     model_name = "mlabonne/Meta-Llama-3-8B"
+    dataset_name = "rajpurkar/squad"
     train_batch_size = 2
     eval_batch_size = 2
     num_epochs = 3
@@ -163,6 +166,7 @@ if __name__ == "__main__":
 
     trainer = BasicLoRAModel(
         model_name=model_name,
+        dataset_name=dataset_name,
         train_batch_size=train_batch_size,
         eval_batch_size=eval_batch_size,
         num_epochs=num_epochs,
