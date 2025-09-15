@@ -82,11 +82,21 @@ class BasicLoRAModel:
             model_inputs["labels"] = labels["input_ids"]
             return model_inputs
 
-        tokenized_train = dataset["train"].map(tokenize, batched=True, remove_columns=dataset["train"].column_names)
-        tokenized_val = dataset["validation"].map(tokenize, batched=True, remove_columns=dataset["validation"].column_names)
+        self.dataset = dataset.map(
+         tokenize, batched=True, remove_columns=dataset["train"].column_names
+      )
 
-        self.train_loader = DataLoader(tokenized_train, batch_size=self.train_batch_size, shuffle=True, collate_fn=default_data_collator)
-        self.val_loader = DataLoader(tokenized_val, batch_size=self.eval_batch_size, collate_fn=default_data_collator)
+        self.train_loader = DataLoader(
+            self.dataset["train"],
+            batch_size=self.train_batch_size,
+            shuffle=True,
+            collate_fn=default_data_collator
+        )
+        self.val_loader = DataLoader(
+            self.dataset["validation"],
+            batch_size=self.eval_batch_size,
+            collate_fn=default_data_collator
+        )
 
     def init_model(self):
         self.model = AutoModelForCausalLM.from_pretrained(self.model_name, device_map="auto")
