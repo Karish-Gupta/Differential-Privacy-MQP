@@ -11,10 +11,8 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, default_data_colla
 from transformers.utils import logging
 from datasets import load_dataset
 from flashdp.api.wrap_model import wrap_with_flashdp_layers
-from utils import evaluate_exact_match, evaluate_f1  # Importing the eval functions from utils.py
+from utils import evaluate_exact_match, evaluate_f1, start_gpu_utilization_logging, stop_gpu_utilization_logging, print_gpu_utilization_summary
 from peft import LoraConfig, get_peft_model, TaskType  # Added for LoRA
-import subprocess  # Add this import
-
 
 logging.set_verbosity_error()
 
@@ -61,9 +59,9 @@ class FlashDPModel:
 
     def preprocess_dataset(self, subsample_size=5000, seed=101):
         dataset = load_dataset("squad")
-        # Subsample for speed
+        # Subsample for speed   
         dataset["train"] = dataset["train"].shuffle(seed=seed).select(range(subsample_size))
-        dataset["validation"] = dataset["validation"].shuffle(seed=seed).select(range(subsample_size // 10))
+        dataset["validation"] = dataset["validation"].shuffle(seed=seed).select(range(subsample_size // 50))
 
         def preprocess(example):
             example["input_text"] = "Question: " + example["question"] + " Context: " + example["context"]
@@ -155,7 +153,6 @@ class FlashDPModel:
         if hasattr(self.model, 'hf_device_map'):
             print("[Device Map] Model loaded with device map:")
             print(self.model.hf_device_map)
-        self.print_gpu_utilization()  # Print GPU utilization after model load
         # DP wrapping (before LoRA)
         # If dp_noise is not set, estimate it from target_epsilon
         if self.dp_noise is None and self.target_epsilon is not None:
@@ -207,7 +204,6 @@ class FlashDPModel:
                 total_loss += loss.item()
             avg_loss = total_loss / len(self.train_loader)
             print(f"Epoch {epoch+1}, Loss: {avg_loss:.4f}")
-            self.print_gpu_utilization()  # Print GPU utilization after each epoch
         print(f"DP Training completed with noise_multiplier={self.dp_noise}, C={self.dp_c}, epochs={self.num_epochs}, batch_size={self.train_batch_size}")
         # Save LoRA adapters only
         adapter_dir = "./llama3-8b-flashdp-lora"
@@ -237,20 +233,6 @@ class FlashDPModel:
             self.tokenizer,
             max_gen_length=30
         )
-
-    def print_gpu_utilization(self):
-        try:
-            result = subprocess.run(
-                ["nvidia-smi", "--query-gpu=index,name,utilization.gpu,memory.used,memory.total", "--format=csv,noheader,nounits"],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True, text=True
-            )
-            print("\n[GPU UTILIZATION]")
-            for line in result.stdout.strip().split('\n'):
-                idx, name, util, mem_used, mem_total = [x.strip() for x in line.split(',')]
-                print(f"GPU {idx} ({name}): Utilization {util}% | Memory {mem_used} MiB / {mem_total} MiB")
-            print()
-        except Exception as e:
-            print(f"Could not query GPU utilization: {e}")
 
 if __name__ == "__main__":
 
@@ -295,9 +277,14 @@ if __name__ == "__main__":
         lora_target_modules=lora_target_modules,
         lora_bias=lora_bias,
     )
-    flashdp.print_gpu_utilization()  # Print initial GPU utilization
+    # Start GPU utilization logging using utils
+    gpu_util_thread, gpu_util_stop_event, gpu_util_data = start_gpu_utilization_logging(interval=1.0)
 
-    flashdp.preprocess_dataset()
-    flashdp.init_model()
-    flashdp.train()
-    flashdp.evaluate()
+    try:
+        flashdp.preprocess_dataset()
+        flashdp.init_model()
+        flashdp.train()
+        flashdp.evaluate()
+    finally:
+        stop_gpu_utilization_logging(gpu_util_thread, gpu_util_stop_event)
+        print_gpu_utilization_summary(gpu_util_data)
