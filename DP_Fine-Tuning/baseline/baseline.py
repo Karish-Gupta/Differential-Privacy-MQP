@@ -1,44 +1,50 @@
-# Training Llama3 with HuggingFace + LoRA (no FlashDP)
-import sys
+import numpy as np
+import torch
+import tqdm
+from peft import LoraConfig, get_peft_model, TaskType
+from torch.utils.data import DataLoader
+from transformers import AutoModelForCausalLM, AutoTokenizer, default_data_collator
+from datasets import load_dataset
+from utils import *
+from huggingface_hub import login
 import os
 
-import torch
-from torch.utils.data import DataLoader, Dataset
-from transformers import AutoModelForCausalLM, AutoTokenizer
-from transformers.utils import logging
-from datasets import load_dataset
-from utils import evaluate_exact_match  # Importing eval function from utils.py
-from peft import LoraConfig, get_peft_model, TaskType
-
-logging.set_verbosity_error()
+# Login to HF CLI
+if "HF_TOKEN" in os.environ:
+    login(token=os.environ["HF_TOKEN"])
+# transformers.utils.logging.set_verbosity_debug()
 
 
-class BasicLoRAModel:
+class Baseline:
     def __init__(
         self,
         model_name,
+        dataset_name,
         train_batch_size,
         eval_batch_size,
+        gradient_accumulation_steps,
         num_epochs,
         learning_rate,
-        max_length,
-        lora_r=8,
-        lora_alpha=32,
+        max_input_length,
+        max_target_length,
+        lora_r=16,
+        lora_alpha=16,
         lora_dropout=0.05,
-        lora_target_modules=None,
-        lora_bias="none",
+        lora_target_modules=None,  # if None, good defaults for LLaMA
+        lora_bias="none",          # "none" | "lora_only" | "all"
     ):
+        # Configs
         self.model_name = model_name
+        self.dataset_name = dataset_name
         self.train_batch_size = train_batch_size
         self.eval_batch_size = eval_batch_size
+        self.gradient_accumulation_steps = gradient_accumulation_steps
         self.num_epochs = num_epochs
         self.learning_rate = learning_rate
-        self.max_length = max_length
+        self.max_input_length = max_input_length
+        self.max_target_length = max_target_length
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.tokenizer = None
-        self.model = None
-        self.train_loader = None
-        self.val_loader = None
+
         # LoRA configs
         self.lora_r = lora_r
         self.lora_alpha = lora_alpha
@@ -46,70 +52,102 @@ class BasicLoRAModel:
         self.lora_target_modules = lora_target_modules
         self.lora_bias = lora_bias
 
-    def preprocess_dataset(self):
-        class SquadTextDataset(Dataset):
-            def __init__(self, tokenizer, split="train", max_length=128):
-                squad = load_dataset("squad")
-                if split == "train":
-                    self.data = squad["train"].select(range(2500))
-                else:
-                    self.data = squad["validation"].select(range(50))
-                self.tokenizer = tokenizer
-                self.max_length = max_length
-                self.samples = self._preprocess()
+        # Setup
+        self.dataset = None
+        self.tokenizer = None
+        self.train_loader = None
+        self.val_loader = None
+        self.model = None
+        self.optimizer = None
+        self.privacy_engine = None
 
-            def _preprocess(self):
-                samples = []
-                for item in self.data:
-                    text = f"question: {item['question']} context: {item['context']} answer: {item['answers']['text'][0] if item['answers']['text'] else ''}"
-                    tokens = self.tokenizer.encode(
-                        text,
-                        max_length=self.max_length,
-                        truncation=True,
-                        padding="max_length",
-                    )
-                    samples.append(tokens)
-                return samples
+    def preprocess_dataset(self, subsample_size, seed=101):
+        dataset = load_dataset(self.dataset_name)
 
-            def __len__(self):
-                return len(self.samples)
+        if subsample_size is not None:
+            dataset["train"] = dataset["train"].shuffle(seed=seed).select(range(subsample_size))
+            dataset["validation"] = dataset["validation"].shuffle(seed=seed).select(range(subsample_size // 10))
 
-            def __getitem__(self, idx):
-                x = torch.tensor(self.samples[idx][:-1], dtype=torch.long)
-                y = torch.tensor(self.samples[idx][1:], dtype=torch.long)
-                return x, y
-
-        # Tokenizer
+        # Initialize tokenizer first
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
         self.tokenizer.pad_token = self.tokenizer.eos_token
+        self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
 
-        # Train loader
-        train_dataset = SquadTextDataset(
-            self.tokenizer, split="train", max_length=self.max_length
-        )
-        self.train_loader = DataLoader(train_dataset, batch_size=self.train_batch_size, shuffle=True)
+        def preprocess_and_tokenize(example):
+            # Create the full text sequence for causal LM
+            input_text = "Context: " + example["context"] + " Question: " + example["question"] + " Answer: "
+            answer = example["answers"]["text"][0] if len(example["answers"]["text"]) > 0 else ""
+            target_text = answer + self.tokenizer.eos_token  # Add EOS token to mark end of answer
 
-        # Validation loader
-        val_dataset = SquadTextDataset(
-            self.tokenizer, split="validation", max_length=self.max_length
+            # Combine into single sequence
+            full_text = input_text + target_text
+
+            # Tokenize the entire sequence
+            tokenized = self.tokenizer(
+                full_text,
+                max_length=self.max_input_length + self.max_target_length,
+                truncation=True,
+                padding="max_length",
+                return_tensors=None,
+            )
+
+            # Create labels: -100 for input part, actual tokens for answer part
+            input_tokens = self.tokenizer(
+                input_text,
+                max_length=self.max_input_length,
+                truncation=True,
+                padding=False,
+                return_tensors=None,
+            )
+
+            input_length = len(input_tokens["input_ids"])
+            labels = [-100] * input_length  # Mask the input part
+
+            # Add the answer tokens as labels
+            answer_tokens = self.tokenizer(
+                target_text,
+                max_length=self.max_target_length,
+                truncation=True,
+                padding=False,
+                return_tensors=None,
+            )
+
+            labels.extend(answer_tokens["input_ids"])
+
+            # Pad labels to same length as input_ids
+            current_length = len(labels)
+            if current_length < len(tokenized["input_ids"]):
+                labels.extend([-100] * (len(tokenized["input_ids"]) - current_length))
+            else:
+                labels = labels[:len(tokenized["input_ids"])]
+
+            tokenized["labels"] = labels
+            return tokenized
+
+        self.dataset = dataset.map(
+            preprocess_and_tokenize,
+            batched=False,
+            remove_columns=dataset["train"].column_names,
         )
-        self.val_loader = DataLoader(val_dataset, batch_size=self.eval_batch_size)
+
+        self.train_loader = DataLoader(
+            self.dataset["train"],
+            batch_size=self.train_batch_size,
+            shuffle=True,
+            collate_fn=default_data_collator,
+        )
+        self.val_loader = DataLoader(
+            self.dataset["validation"],
+            batch_size=self.eval_batch_size,
+            collate_fn=default_data_collator,
+        )
 
     def init_model(self):
-        # Load base model
-        self.model = AutoModelForCausalLM.from_pretrained(self.model_name, device_map="auto")
-        self.model = self.model.to(torch.float32)
+        self.model = AutoModelForCausalLM.from_pretrained(self.model_name, device_map="cuda:0")
+        self.model = self.model.to(torch.float16)
+        self.model.gradient_checkpointing_enable()
 
-        # LoRA config
-        target_modules = self.lora_target_modules or [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-            "o_proj",
-            "gate_proj",
-            "up_proj",
-            "down_proj",
-        ]
+        target_modules = self.lora_target_modules or ["q_proj", "k_proj", "v_proj", "o_proj"]
         peft_config = LoraConfig(
             task_type=TaskType.CAUSAL_LM,
             r=self.lora_r,
@@ -118,85 +156,100 @@ class BasicLoRAModel:
             bias=self.lora_bias,
             target_modules=target_modules,
         )
+
         self.model = get_peft_model(self.model, peft_config)
         self.model.print_trainable_parameters()
 
-        # Optimizer
+        # Optimizer over only trainable (LoRA) params
         trainable_params = (p for p in self.model.parameters() if p.requires_grad)
         self.optimizer = torch.optim.AdamW(trainable_params, lr=self.learning_rate)
 
     def train(self):
         self.model.train()
-        model_device = next(self.model.parameters()).device
         for epoch in range(self.num_epochs):
-            total_loss = 0
-            for x, y in self.train_loader:
-                x, y = x.to(model_device), y.to(model_device)
-                outputs = self.model(input_ids=x, labels=y)
-                loss = outputs.loss
+            running_loss = 0.0
+            for step, batch in enumerate(self.train_loader):
+                input_ids = batch["input_ids"].to(self.device)
+                attention_mask = batch["attention_mask"].to(self.device)
+                labels = batch["labels"].to(self.device)
+
+                outputs = self.model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
+                loss = outputs.loss / self.gradient_accumulation_steps
                 loss.backward()
-                self.optimizer.step()
-                self.optimizer.zero_grad()
-                total_loss += loss.item()
-            avg_loss = total_loss / len(self.train_loader)
-            print(f"Epoch {epoch+1}, Loss: {avg_loss:.4f}")
+
+                if (step + 1) % self.gradient_accumulation_steps == 0:
+                    self.optimizer.step()
+                    self.optimizer.zero_grad()
+
+                running_loss += loss.item()
+                if step % 50 == 0:
+                    print(f"Epoch {epoch+1}, Step {step}, Loss {running_loss / (step+1):.4f}")
+
 
         # Save LoRA adapters only
-        adapter_dir = "./llama3-8b-lora"
+        adapter_dir = "./llama3-8b-instruct-squad-dp-lora"
         self.model.save_pretrained(adapter_dir)
-        if self.tokenizer:
-            self.tokenizer.save_pretrained(adapter_dir)
+        self.tokenizer.save_pretrained(adapter_dir)
 
     def evaluate(self):
         if self.val_loader is None:
             print("Validation loader not initialized. Run preprocess_dataset() first.")
             return
         model_device = next(self.model.parameters()).device
-        print("Evaluating with Exact Match metric from utils.py...")
-        evaluate_exact_match(
+        print("Evaluating...")
+        evaluate_model(
             self.model,
             self.val_loader,
             model_device,
             self.tokenizer,
             max_gen_length=30,
+            show_samples=10,
         )
 
 
 if __name__ == "__main__":
-    # Configs
-    model_name = "mlabonne/Meta-Llama-3-8B"
-    train_batch_size = 2
-    eval_batch_size = 2
-    num_epochs = 1
-    learning_rate = 1e-5
-    max_length = 128
+    # Model Configs
+    model_name = "meta-llama/Meta-Llama-3-8B-Instruct"
+    dataset_name = "rajpurkar/squad"
+    train_batch_size = 1
+    eval_batch_size = 1
+    gradient_accumulation_steps = 8
+    num_epochs = 5
+    learning_rate = 2e-4
+    max_input_length = 512
+    max_target_length = 512
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # LoRA configs
-    lora_r = 16
-    lora_alpha = 32
-    lora_dropout = 0.05
-    lora_target_modules = None
-    lora_bias = "none"
-
-    if torch.cuda.device_count() == 0:
-        print("ERROR: CUDA GPU required.")
-        sys.exit(1)
-    print(f"Using {torch.cuda.device_count()} GPU(s).")
-
-    trainer = BasicLoRAModel(
+    baseline_model = Baseline(
         model_name=model_name,
+        dataset_name=dataset_name,
         train_batch_size=train_batch_size,
         eval_batch_size=eval_batch_size,
+        gradient_accumulation_steps=gradient_accumulation_steps,
         num_epochs=num_epochs,
         learning_rate=learning_rate,
-        max_length=max_length,
-        lora_r=lora_r,
-        lora_alpha=lora_alpha,
-        lora_dropout=lora_dropout,
-        lora_target_modules=lora_target_modules,
-        lora_bias=lora_bias,
+        max_input_length=max_input_length,
+        max_target_length=max_target_length,
     )
-    trainer.preprocess_dataset()
-    trainer.init_model()
-    trainer.train()
-    trainer.evaluate()
+
+    # Start GPU utilization logging using utils
+    gpu_util_thread, gpu_util_stop_event, gpu_util_data = start_gpu_utilization_logging(interval=1.0)
+
+    baseline_model.preprocess_dataset(subsample_size=5000, seed=101)
+    baseline_model.init_model()
+    baseline_model.train()
+
+    print(f"Model: {model_name}")
+    print(f"On device: {device}")
+    print(f"Number of epochs: {num_epochs}")
+    print(f"Train batch size: {train_batch_size}")
+    print(f"Eval batch size: {eval_batch_size}")
+    print(f"Learning rate: {learning_rate}")
+    print(f"Max input length: {max_input_length}")
+    print(f"Max target length: {max_target_length}")
+    
+    baseline_model.evaluate()
+
+    # Output GPU logging
+    stop_gpu_utilization_logging(gpu_util_thread, gpu_util_stop_event)
+    print_gpu_utilization_summary(gpu_util_data)

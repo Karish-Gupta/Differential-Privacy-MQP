@@ -32,7 +32,7 @@ class FastDPModel:
       lora_r=16,
       lora_alpha=16,
       lora_dropout=0.05,
-      lora_target_modules=None,   # if None, good defaults for LLaMA/Mistral-family are used
+      lora_target_modules=None,   # if None, good defaults for LLaMA
       lora_bias="none",           # "none" | "lora_only" | "all"
    ):
       # Configs
@@ -223,7 +223,7 @@ class FastDPModel:
          print("Validation loader not initialized. Run preprocess_dataset() first.")
          return
       model_device = next(self.model.parameters()).device
-      print("Evaluating with Exact Match metric from utils.py...")
+      print("Evaluating...")
       evaluate_model(
          self.model,
          self.val_loader,
@@ -265,13 +265,18 @@ if __name__ == "__main__":
    # Start GPU utilization logging using utils
    gpu_util_thread, gpu_util_stop_event, gpu_util_data = start_gpu_utilization_logging(interval=1.0)
 
-   fastdp.preprocess_dataset(subsample_size=2500, seed=101)
+   fastdp.preprocess_dataset(subsample_size=5000, seed=101)
    fastdp.init_model()
    fastdp.train()
    
    print(f"Model: {model_name}")
    print(f"On device: {device}")
-   print(f"Target epsilon: {target_epsilon}")
+   print(f"Number of epochs: {num_epochs}")
+   print(f"Train batch size: {train_batch_size}")
+   print(f"Eval batch size: {eval_batch_size}")
+   print(f"Learning rate: {learning_rate}")
+   print(f"Max input length: {max_input_length}")
+   print(f"Max target length: {max_target_length}")
    fastdp.evaluate()
 
    # Ouput GPU logging
