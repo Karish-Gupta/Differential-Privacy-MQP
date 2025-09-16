@@ -65,46 +65,73 @@ class FastDPModel:
       self.privacy_engine = None
 
 
-   def preprocess_dataset(self, subsample_size, seed=42):
+   def preprocess_dataset(self, subsample_size, seed=101):
       dataset = load_dataset(self.dataset_name)
 
       if subsample_size is not None:
-         # Shuffle first to avoid always taking the same top slice
          dataset["train"] = dataset["train"].shuffle(seed=seed).select(range(subsample_size))
          dataset["validation"] = dataset["validation"].shuffle(seed=seed).select(range(subsample_size // 10)) 
 
-      def preprocess(example):
-         example["input_text"] = "Context: " + example["context"] + " Question: " + example["question"]
-         answer = example["answers"]["text"][0] if len(example["answers"]["text"]) > 0 else ""
-         example["target_text"] = answer
-         return example
-
-      dataset = dataset.map(preprocess)
-
-      # Initialize tokenizer
+      # Initialize tokenizer first
       self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
       self.tokenizer.pad_token = self.tokenizer.eos_token
       self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
 
-      def tokenize(example):
-         model_inputs = self.tokenizer(
-            example["input_text"],
+      def preprocess_and_tokenize(example):
+         # Create the full text sequence for causal LM
+         input_text = "Context: " + example["context"] + " Question: " + example["question"] + " Answer: "
+         answer = example["answers"]["text"][0] if len(example["answers"]["text"]) > 0 else ""
+         target_text = answer + self.tokenizer.eos_token  # Add EOS token to mark end of answer
+         
+         # Combine into single sequence
+         full_text = input_text + target_text
+         
+         # Tokenize the entire sequence
+         tokenized = self.tokenizer(
+            full_text,
+            max_length=self.max_input_length + self.max_target_length,
+            truncation=True,
+            padding="max_length",
+            return_tensors=None,
+         )
+         
+         # Create labels: -100 for input part, actual tokens for answer part
+         input_tokens = self.tokenizer(
+            input_text,
             max_length=self.max_input_length,
             truncation=True,
-            padding="max_length"
+            padding=False,
+            return_tensors=None,
          )
-         labels = self.tokenizer(
-            example["target_text"],
+         
+         input_length = len(input_tokens["input_ids"])
+         labels = [-100] * input_length  # Mask the input part
+         
+         # Add the answer tokens as labels
+         answer_tokens = self.tokenizer(
+            target_text,
             max_length=self.max_target_length,
             truncation=True,
-            padding="max_length"
+            padding=False,
+            return_tensors=None,
          )
-         labels["input_ids"] = [(l if l != self.tokenizer.pad_token_id else -100) for l in labels["input_ids"]]
-         model_inputs["labels"] = labels["input_ids"]
-         return model_inputs
+         
+         labels.extend(answer_tokens["input_ids"])
+         
+         # Pad labels to same length as input_ids
+         current_length = len(labels)
+         if current_length < len(tokenized["input_ids"]):
+            labels.extend([-100] * (len(tokenized["input_ids"]) - current_length))
+         else:
+            labels = labels[:len(tokenized["input_ids"])]
+         
+         tokenized["labels"] = labels
+         return tokenized
 
       self.dataset = dataset.map(
-         tokenize, batched=True, remove_columns=dataset["train"].column_names
+         preprocess_and_tokenize, 
+         batched=False,
+         remove_columns=dataset["train"].column_names
       )
 
       self.train_loader = DataLoader(
