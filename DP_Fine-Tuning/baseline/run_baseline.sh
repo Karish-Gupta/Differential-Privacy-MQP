@@ -12,8 +12,8 @@
 module load python/3.11.10
 module load cuda/12.4.0/3mdaov5
 
-python -m venv pytorch_example_env
-source pytorch_example_env/bin/activate
+python -m venv env
+source env/bin/activate
 
 pip install --upgrade pip
 pip install numpy
