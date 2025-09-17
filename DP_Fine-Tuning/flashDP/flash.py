@@ -172,7 +172,7 @@ class FlashDPModel:
             noise_multiplier=self.dp_noise
         )
         # LoRA config (after FlashDP)
-        target_modules = self.lora_target_modules or ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"] # Try to modify this, remove last 3??
+        target_modules = self.lora_target_modules or ["q_proj", "k_proj", "v_proj", "o_proj"]
         peft_config = LoraConfig(
             task_type=TaskType.CAUSAL_LM,
             r=self.lora_r,
@@ -240,16 +240,16 @@ if __name__ == "__main__":
     target_epsilon = 8.0  # Set desired epsilon 
     target_delta = 1e-5   # Set desired delta 
     model_name = "mlabonne/Meta-Llama-3-8B"
-    train_batch_size = 2
-    eval_batch_size = 2
-    num_epochs = 3
-    learning_rate = 1e-4
+    train_batch_size = 1
+    eval_batch_size = 1
+    num_epochs = 5
+    learning_rate = 2e-4
     max_length = 512
     dp_c = 1.0
     dp_noise = None  # Let the code compute noise_multiplier from target_epsilon
     # LoRA configs                      
     lora_r = 16
-    lora_alpha = 32
+    lora_alpha = 16
     lora_dropout = 0.05
     lora_target_modules = None
     lora_bias = "none"
