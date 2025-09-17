@@ -277,6 +277,8 @@ if __name__ == "__main__":
    print(f"Learning rate: {learning_rate}")
    print(f"Max input length: {max_input_length}")
    print(f"Max target length: {max_target_length}")
+   print(f"Traing size: {5000}")
+
    fastdp.evaluate()
 
    # Ouput GPU logging

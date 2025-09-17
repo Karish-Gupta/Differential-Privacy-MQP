@@ -14,8 +14,9 @@ module load cuda/12.4.0/3mdaov5
 
 source env/bin/activate
 
-pip install -U "huggingface_hub[cli]"
 pip install --upgrade pip
+pip install git+https://github.com/awslabs/fast-differential-privacy.git
+pip install -U "huggingface_hub[cli]"
 pip install numpy
 pip install torch
 pip install transformers
@@ -24,5 +25,4 @@ pip install tqdm
 pip install scikit-learn
 pip install accelerate
 pip install peft
-
 python fastdp.py
