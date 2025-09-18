@@ -3,6 +3,12 @@ from torch.utils.data import DataLoader
 from transformers import AutoModelForCausalLM, AutoTokenizer, default_data_collator
 from datasets import load_dataset
 from utils import evaluate_model
+from huggingface_hub import login
+import os
+
+
+print("Logging into Hugging Face Hub...")
+login(token=os.environ["HF_TOKEN"])
 
 class BaselineEval:
     def __init__(self, model_name, dataset_name, eval_batch_size, max_input_length, max_target_length):
