@@ -84,6 +84,13 @@ def evaluate_model(model, val_loader, device, tokenizer, max_gen_length=50, show
             # Exact match
             em = 1 if exact_match(pred, ref) else 0
             exact_match_scores.append(em)
+            
+        # print(f"Input shape: {input_ids.shape}")
+        # print(f"Output shape: {outputs.shape}")
+        # print(f"Input: {input_ids}")
+        # print(f"Output: {outputs}")
+        # print(f"Generated tokens shape: {generated_ids.shape}")
+        # print(f"Generated tokens: {generated_ids}")
 
     # Aggregate metrics
     contains_accuracy = np.mean(contains_scores)

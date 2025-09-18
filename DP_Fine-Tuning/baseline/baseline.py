@@ -212,7 +212,7 @@ if __name__ == "__main__":
     # Start GPU utilization logging using utils
     gpu_util_thread, gpu_util_stop_event, gpu_util_data = start_gpu_utilization_logging(interval=1.0)
 
-    baseline_model.preprocess_dataset(subsample_size=5000, seed=101)
+    baseline_model.preprocess_dataset(subsample_size=2500, seed=101)
     baseline_model.init_model()
     baseline_model.train()
 
@@ -224,7 +224,7 @@ if __name__ == "__main__":
     print(f"Learning rate: {learning_rate}")
     print(f"Max input length: {max_input_length}")
     print(f"Max target length: {max_target_length}")
-    print(f"Traing size: {5000}")
+    print(f"Traing size: {2500}")
 
     baseline_model.evaluate()
 
