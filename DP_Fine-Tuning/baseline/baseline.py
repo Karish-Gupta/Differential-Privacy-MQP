@@ -74,52 +74,29 @@ class Baseline:
         self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
 
         def preprocess_and_tokenize(example):
-            # Create the full text sequence for causal LM
             input_text = "Context: " + example["context"] + " Question: " + example["question"] + " Answer: "
-            answer = example["answers"]["text"][0] if len(example["answers"]["text"]) > 0 else ""
-            target_text = answer + self.tokenizer.eos_token  # Add EOS token to mark end of answer
-
-            # Combine into single sequence
+            target_text = example["answers"]["text"][0] if len(example["answers"]["text"]) > 0 else ""
             full_text = input_text + target_text
-
-            # Tokenize the entire sequence
+            
             tokenized = self.tokenizer(
                 full_text,
                 max_length=self.max_input_length + self.max_target_length,
                 truncation=True,
-                padding="max_length",
-                return_tensors=None,
+                padding="max_length"
             )
 
-            # Create labels: -100 for input part, actual tokens for answer part
             input_tokens = self.tokenizer(
                 input_text,
                 max_length=self.max_input_length,
                 truncation=True,
                 padding=False,
-                return_tensors=None,
+                add_special_tokens=False
             )
-
             input_length = len(input_tokens["input_ids"])
-            labels = [-100] * input_length  # Mask the input part
 
-            # Add the answer tokens as labels
-            answer_tokens = self.tokenizer(
-                target_text,
-                max_length=self.max_target_length,
-                truncation=True,
-                padding=False,
-                return_tensors=None,
-            )
-
-            labels.extend(answer_tokens["input_ids"])
-
-            # Pad labels to same length as input_ids
-            current_length = len(labels)
-            if current_length < len(tokenized["input_ids"]):
-                labels.extend([-100] * (len(tokenized["input_ids"]) - current_length))
-            else:
-                labels = labels[:len(tokenized["input_ids"])]
+            labels = tokenized["input_ids"].copy()
+            labels[:input_length] = [-100] * input_length  # mask input
+            labels = [(l if l != self.tokenizer.pad_token_id else -100) for l in labels]
 
             tokenized["labels"] = labels
             return tokenized
@@ -182,7 +159,7 @@ class Baseline:
                     self.optimizer.zero_grad()
 
                 running_loss += loss.item()
-                if step % 50 == 0:
+                if step % 500 == 0:
                     print(f"Epoch {epoch+1}, Step {step}, Loss {running_loss / (step+1):.4f}")
 
 
@@ -210,7 +187,7 @@ class Baseline:
 if __name__ == "__main__":
     # Model Configs
     model_name = "meta-llama/Meta-Llama-3-8B-Instruct"
-    dataset_name = "rajpurkar/squad"
+    dataset_name = "squad"
     train_batch_size = 1
     eval_batch_size = 1
     gradient_accumulation_steps = 8

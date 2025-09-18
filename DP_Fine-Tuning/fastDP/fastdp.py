@@ -81,7 +81,7 @@ class FastDPModel:
          # Create the full text sequence for causal LM
          input_text = "Context: " + example["context"] + " Question: " + example["question"] + " Answer: "
          answer = example["answers"]["text"][0] if len(example["answers"]["text"]) > 0 else ""
-         target_text = answer + self.tokenizer.eos_token  # Add EOS token to mark end of answer
+         target_text = answer + self.tokenizer.eos_token 
          
          # Combine into single sequence
          full_text = input_text + target_text
@@ -238,7 +238,7 @@ class FastDPModel:
 if __name__ == "__main__":
    # Model Configs
    model_name = "meta-llama/Meta-Llama-3-8B-Instruct"
-   dataset_name = "rajpurkar/squad"
+   dataset_name = "squad"
    train_batch_size = 1
    eval_batch_size = 1
    gradient_accumulation_steps = 8
