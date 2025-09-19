@@ -82,7 +82,9 @@ class Baseline:
                 full_text,
                 max_length=self.max_input_length + self.max_target_length,
                 truncation=True,
-                padding="max_length"
+                padding="max_length",
+                add_special_tokens=True
+
             )
 
             input_tokens = self.tokenizer(
