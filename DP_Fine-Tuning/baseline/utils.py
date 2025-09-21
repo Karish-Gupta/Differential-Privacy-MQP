@@ -51,7 +51,7 @@ def evaluate_model(model, val_loader, device, tokenizer, max_gen_length=50, show
                 input_ids=input_ids,
                 attention_mask=attention_mask,
                 max_new_tokens=max_gen_length,
-                pad_token_id=tokenizer.pad_token_id,  # Use pad_token_id
+                pad_token_id=tokenizer.eos_token_id,
                 eos_token_id=tokenizer.eos_token_id,
                 do_sample=False,
                 temperature=1.0,  # Temperature=0 is not valid, use 1.0 for greedy
