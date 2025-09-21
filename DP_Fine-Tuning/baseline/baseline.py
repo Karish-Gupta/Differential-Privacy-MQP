@@ -53,7 +53,6 @@ class Baseline:
         self.lora_bias = lora_bias
 
         # Setup
-        self.dataset = None
         self.tokenizer = None
         self.train_loader = None
         self.val_loader = None
@@ -66,14 +65,14 @@ class Baseline:
 
         if subsample_size is not None:
             dataset["train"] = dataset["train"].shuffle(seed=seed).select(range(subsample_size))
-            dataset["validation"] = dataset["validation"].shuffle(seed=seed).select(range(subsample_size // 10))
+            dataset["validation"] = dataset["validation"].shuffle(seed=seed).select(range(max(subsample_size // 10, 1)))
 
         # Initialize tokenizer first
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
         self.tokenizer.pad_token = self.tokenizer.eos_token
         self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
 
-        def preprocess_and_tokenize(example):
+        def preprocess_and_tokenize_train(example):
             input_text = "Context: " + example["context"] + " Question: " + example["question"] + " Answer: "
             target_text = example["answers"]["text"][0] if len(example["answers"]["text"]) > 0 else ""
             full_text = input_text + target_text
@@ -83,8 +82,6 @@ class Baseline:
                 max_length=self.max_input_length + self.max_target_length,
                 truncation=True,
                 padding="max_length",
-                add_special_tokens=True
-
             )
 
             input_tokens = self.tokenizer(
@@ -102,21 +99,59 @@ class Baseline:
 
             tokenized["labels"] = labels
             return tokenized
+        
+        def preprocess_and_tokenize_eval(example):
+            # Prompt only (no gold answer appended to input_ids)
+            input_text = "Context: " + example["context"] + " Question: " + example["question"] + " Answer: "
+            target_text = example["answers"]["text"][0] if len(example["answers"]["text"]) > 0 else ""
 
-        self.dataset = dataset.map(
-            preprocess_and_tokenize,
+            # Tokenize prompt only for inputs
+            tokenized_inputs = self.tokenizer(
+                input_text,
+                max_length=self.max_input_length,
+                truncation=True,
+                padding="max_length"
+            )
+
+            # Tokenize full_text (with answer) just to build labels
+            tokenized_full = self.tokenizer(
+                input_text + target_text,
+                max_length=self.max_input_length + self.max_target_length,
+                truncation=True,
+                padding="max_length"
+            )
+
+            # Mask out the input part, keep only the answer portion for labels
+            labels = tokenized_full["input_ids"].copy()
+            input_length = len(self.tokenizer(input_text, add_special_tokens=False)["input_ids"])
+            labels[:input_length] = [-100] * input_length
+            labels = [(l if l != self.tokenizer.pad_token_id else -100) for l in labels]
+
+            tokenized_inputs["labels"] = labels
+            
+            return tokenized_inputs
+
+        train_dataset = dataset["train"].map(
+            preprocess_and_tokenize_train,
             batched=False,
             remove_columns=dataset["train"].column_names,
         )
 
+        eval_dataset = dataset["validation"].map(
+            preprocess_and_tokenize_eval, 
+            batched=False,
+            remove_columns=dataset["validation"].column_names
+        )
+
         self.train_loader = DataLoader(
-            self.dataset["train"],
+            train_dataset,
             batch_size=self.train_batch_size,
             shuffle=True,
             collate_fn=default_data_collator,
         )
+        
         self.val_loader = DataLoader(
-            self.dataset["validation"],
+            eval_dataset,
             batch_size=self.eval_batch_size,
             collate_fn=default_data_collator,
         )

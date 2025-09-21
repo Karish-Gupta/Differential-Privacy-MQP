@@ -31,128 +31,77 @@ def contains_token(pred, ref):
     return False
 
 
-def evaluate_model(model, val_loader, device, tokenizer, max_gen_length=50, show_samples=20, seed=42):
+def evaluate_model(model, val_loader, device, tokenizer, max_gen_length=50, show_samples=5, seed=101):
     model.eval()
-    contains_scores = []
-    exact_match_scores = []
-    f1_scores = []
-    all_preds, all_refs = [], []
-    
+    preds, refs = [], []
+
     for batch in tqdm(val_loader, desc="Evaluating"):
         input_ids = batch["input_ids"].to(device)
-        labels = batch["labels"].to(device)
         attention_mask = batch["attention_mask"].to(device)
-        
+        labels = batch["labels"].to(device)
+
         with torch.no_grad():
-            # Find where each input actually ends (excluding padding)
-            input_lengths = attention_mask.sum(dim=1).cpu()
-            
             outputs = model.generate(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
                 max_new_tokens=max_gen_length,
-                pad_token_id=tokenizer.eos_token_id,
+                pad_token_id=tokenizer.pad_token_id,
                 eos_token_id=tokenizer.eos_token_id,
                 do_sample=False,
-                temperature=1.0,  # Temperature=0 is not valid, use 1.0 for greedy
             )
-        
-        # Extract generated tokens and gold answers properly
-        batch_size = input_ids.shape[0]
-        for i in range(batch_size):
-            # Get actual input length for this sample
-            input_len = input_lengths[i].item()
-            
-            # Extract only generated tokens (after the input)
-            generated_ids = outputs[i, input_len:]
-            
-            # Remove padding and EOS tokens from generation
+
+        for i in range(input_ids.shape[0]):
+            # Slice generated tokens after the prompt
+            generated_ids = outputs[0, input_ids.shape[1]:]
             generated_ids = generated_ids[generated_ids != tokenizer.pad_token_id]
             if len(generated_ids) > 0 and generated_ids[-1] == tokenizer.eos_token_id:
                 generated_ids = generated_ids[:-1]
-            
             pred = tokenizer.decode(generated_ids, skip_special_tokens=True).strip()
+
+            # Decode gold answer from labels
+            label_ids = labels[i]
+            answer_ids = [lid.item() for lid in label_ids if lid.item() != -100]
+            ref = tokenizer.decode(answer_ids, skip_special_tokens=True).strip()
             
-            # Extract gold answer from labels
-            # Get non-masked labels after the input
-            label_seq = labels[i].tolist()
-            
-            # Find where the answer starts (first non -100 after some -100s)
-            answer_start = 0
-            for idx, l in enumerate(label_seq):
-                if l == -100:
-                    answer_start = idx + 1
-                else:
-                    break
-            
-            # Extract answer tokens (non-padding, non-masked)
-            answer_tokens = []
-            for l in label_seq[answer_start:]:
-                if l != -100 and l != tokenizer.pad_token_id:
-                    answer_tokens.append(l)
-                elif l == tokenizer.eos_token_id:
-                    break  # Stop at EOS
-            
-            # Decode the gold answer
-            ref = tokenizer.decode(answer_tokens, skip_special_tokens=True).strip()
-            
-            all_preds.append(pred)
-            all_refs.append(ref)
-            
-            # Calculate metrics
-            pred_norm = pred.lower().strip()
-            ref_norm = ref.lower().strip()
-            
-            # Exact match
-            exact_match_scores.append(1 if pred_norm == ref_norm else 0)
-            
-            # Contains accuracy
-            contains_scores.append(1 if ref_norm in pred_norm or pred_norm in ref_norm else 0)
-            
-            # Calculate F1 for this example (word-level)
-            pred_tokens = pred_norm.split()
-            ref_tokens = ref_norm.split()
-            
-            if len(pred_tokens) == 0 and len(ref_tokens) == 0:
-                f1_scores.append(1.0)
-            elif len(pred_tokens) == 0 or len(ref_tokens) == 0:
-                f1_scores.append(0.0)
-            else:
-                common_tokens = set(pred_tokens) & set(ref_tokens)
-                num_common = sum(min(pred_tokens.count(t), ref_tokens.count(t)) for t in common_tokens)
-                
-                if num_common == 0:
-                    f1_scores.append(0.0)
-                else:
-                    precision = num_common / len(pred_tokens)
-                    recall = num_common / len(ref_tokens)
-                    f1 = 2 * precision * recall / (precision + recall)
-                    f1_scores.append(f1)
-    
-    # Aggregate metrics
-    contains_accuracy = np.mean(contains_scores)
-    exact_match_accuracy = np.mean(exact_match_scores)
+            # Cut off everything before "Answer: "
+            if "Answer:" in pred:
+                pred = pred.split("Answer:", 1)[1].strip()
+
+            preds.append(pred)
+            refs.append(ref)
+
+    # Metrics
+    exact_match = np.mean([1 if p.lower() == r.lower() else 0 for p, r in zip(preds, refs)])
+    contains_acc = np.mean([1 if r.lower() in p.lower() or p.lower() in r.lower() else 0 for p, r in zip(preds, refs)])
+
+    f1_scores = []
+    for p, r in zip(preds, refs):
+        ptoks, rtoks = p.lower().split(), r.lower().split()
+        common = set(ptoks) & set(rtoks)
+        num_common = sum(min(ptoks.count(t), rtoks.count(t)) for t in common)
+        if num_common == 0:
+            f1_scores.append(0.0)
+        else:
+            prec = num_common / len(ptoks)
+            rec = num_common / len(rtoks)
+            f1_scores.append(2 * prec * rec / (prec + rec))
     f1 = np.mean(f1_scores)
-    
-    print(f"\nContains Accuracy: {contains_accuracy:.4f}")
-    print(f"Exact Match Accuracy: {exact_match_accuracy:.4f}")
+
+    print(f"\nContains Accuracy: {contains_acc:.4f}")
+    print(f"Exact Match Accuracy: {exact_match:.4f}")
     print(f"F1 Score: {f1:.4f}")
-    
-    # Show sample predictions
+
+    # Sample outputs
     if show_samples > 0:
         print("\nSample predictions:\n")
         random.seed(seed)
-        indices = random.sample(range(len(all_preds)), min(show_samples, len(all_preds)))
-        for i in indices:
+        for i in random.sample(range(len(preds)), min(show_samples, len(preds))):
             print("=" * 80)
-            print(f"Gold Answer: {all_refs[i]}")
-            print(f"Predicted Answer: {all_preds[i]}")
-    
-    return {
-        "contains_accuracy": contains_accuracy,
-        "exact_match_accuracy": exact_match_accuracy,
-        "f1": f1
-    }
+            print(f"Gold Answer: {refs[i]}")
+            print(f"Predicted Answer: {preds[i]}")
+
+    return {"contains_accuracy": contains_acc, "exact_match_accuracy": exact_match, "f1": f1}
+
     
 def start_gpu_utilization_logging(logfile="gpu_utilization_debug.csv", interval=1.0, util_data=None, stop_event=None):
     """
