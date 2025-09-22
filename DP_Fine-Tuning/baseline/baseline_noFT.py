@@ -47,9 +47,11 @@ class Baseline_no_fine_tuning:
         self.tokenizer.pad_token = self.tokenizer.eos_token
         self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
         
+        system_prompt = "You are a knowledgeable, efficient, and direct AI assistant. Provide concise answers, in format Answer: <answer>"
+        
         def preprocess_and_tokenize_eval(example):
             # Prompt only (no gold answer appended to input_ids)
-            input_text = "Context: " + example["context"] + " Question: " + example["question"] + " Answer: "
+            input_text = system_prompt + " Context: " + example["context"] + " Question: " + example["question"] + " Answer: "
             target_text = example["answers"]["text"][0] if len(example["answers"]["text"]) > 0 else ""
 
             # Tokenize prompt only for inputs
