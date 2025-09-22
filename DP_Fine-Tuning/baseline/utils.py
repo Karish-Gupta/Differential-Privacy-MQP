@@ -52,7 +52,7 @@ def evaluate_model(model, val_loader, device, tokenizer, max_gen_length=50, show
 
         for i in range(input_ids.shape[0]):
             # Slice generated tokens after the prompt
-            generated_ids = outputs[0, input_ids.shape[1]:]
+            generated_ids = outputs[i, input_ids.shape[1]:]
             generated_ids = generated_ids[generated_ids != tokenizer.pad_token_id]
             if len(generated_ids) > 0 and generated_ids[-1] == tokenizer.eos_token_id:
                 generated_ids = generated_ids[:-1]
