@@ -2,9 +2,9 @@
 #SBATCH -N 1                          # allocate 1 compute node
 #SBATCH -n 1                          # total number of tasks
 #SBATCH --mem=32g                     # allocate 32 GB of memory
-#SBATCH -J "run_baseline"              # name of the job
-#SBATCH -o baseline_run_%j.out         # name of the output file
-#SBATCH -e baseline_run_%j.err         # name of the error file
+#SBATCH -J "run_baseline_noFT"              # name of the job
+#SBATCH -o baseline_noFT_run_%j.out         # name of the output file
+#SBATCH -e baseline_noFT_run_%j.err         # name of the error file
 #SBATCH -p short                      # partition to submit to
 #SBATCH -t 12:00:00                   # time limit of 12 hours
 #SBATCH --gres=gpu:H200:1             # request 1 H200 GPU
