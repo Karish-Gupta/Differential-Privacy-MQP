@@ -280,6 +280,7 @@ if __name__ == "__main__":
          max_input_length=max_input_length,
          max_target_length=max_target_length,
          target_epsilon=target_epsilon,
+         train_size=train_size
    )
 
    # Start GPU utilization logging using utils
@@ -297,7 +298,6 @@ if __name__ == "__main__":
    print(f"Learning rate: {learning_rate}")
    print(f"Max input length: {max_input_length}")
    print(f"Max target length: {max_target_length}")
-   print(f"Traing size: {sample_size}")
    print(f"Traing size: {train_size}")
    print(f"Eval size: {eval_size}")
    fastdp.evaluate()
