@@ -4,8 +4,8 @@ import tqdm
 from torch.utils.data import DataLoader
 from transformers import AutoModelForCausalLM, AutoTokenizer, default_data_collator
 from datasets import load_dataset
-from ..utils.model_utils import *
-from ..utils.gpu_usage import *
+from utils.model_utils import *
+from utils.gpu_usage import *
 from huggingface_hub import login
 import os
 
@@ -37,11 +37,10 @@ class Baseline_no_fine_tuning:
         self.val_loader = None
         self.model = None
 
-    def preprocess_dataset(self, subsample_size, seed=101):
+    def preprocess_dataset(self, eval_size, seed=101):
         dataset = load_dataset(self.dataset_name)
 
-        if subsample_size is not None:
-            dataset["validation"] = dataset["validation"].shuffle(seed=seed).select(range(max(subsample_size // 10, 1)))
+        dataset["validation"] = dataset["validation"].shuffle(seed=seed).select(range(eval_size))
 
         # Initialize tokenizer first
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
@@ -122,7 +121,6 @@ if __name__ == "__main__":
     max_input_length = 512
     max_target_length = 512
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    train_size = 5000
     eval_size = 500
 
 
@@ -137,7 +135,7 @@ if __name__ == "__main__":
     # Start GPU utilization logging using utils
     gpu_util_thread, gpu_util_stop_event, gpu_util_data = start_gpu_utilization_logging(interval=1.0)
 
-    baseline_model_noFT.preprocess_dataset(train_size=train_size, eval_size=eval_size, seed=101)
+    baseline_model_noFT.preprocess_dataset(eval_size=eval_size, seed=101)
     baseline_model_noFT.init_model()
 
     print(f"Model: {model_name}")
@@ -145,7 +143,6 @@ if __name__ == "__main__":
     print(f"Eval batch size: {eval_batch_size}")
     print(f"Max input length: {max_input_length}")
     print(f"Max target length: {max_target_length}")
-    print(f"Traing size: {train_size}")
     print(f"Eval size: {eval_size}")
     baseline_model_noFT.evaluate()
 

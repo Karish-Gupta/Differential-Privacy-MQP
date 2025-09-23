@@ -12,8 +12,8 @@ from transformers.utils import logging
 from datasets import load_dataset
 from flashdp.api.wrap_model import wrap_with_flashdp_layers
 from peft import LoraConfig, get_peft_model, TaskType  # Added for LoRA
-from ..utils.model_utils import *
-from ..utils.gpu_usage import *
+from utils.model_utils import *
+from utils.gpu_usage import *
 
 logging.set_verbosity_error()
 

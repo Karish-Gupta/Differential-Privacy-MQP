@@ -5,8 +5,8 @@ from peft import LoraConfig, get_peft_model, TaskType
 from torch.utils.data import DataLoader
 from transformers import AutoModelForCausalLM, AutoTokenizer, default_data_collator
 from datasets import load_dataset
-from ..utils.model_utils import *
-from ..utils.gpu_usage import *
+from utils.model_utils import *
+from utils.gpu_usage import *
 from huggingface_hub import login
 import os
 

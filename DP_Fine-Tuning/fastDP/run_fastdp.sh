@@ -9,6 +9,8 @@
 #SBATCH -t 12:00:00                   # time limit of 12 hours
 #SBATCH --gres=gpu:H100:1             # request 1 H100 GPU
 
+cd $SLURM_SUBMIT_DIR/..
+
 module load python/3.10.2/mqmlxcf
 module load cuda/12.4.0/3mdaov5
 
@@ -25,4 +27,6 @@ pip install tqdm
 pip install scikit-learn
 pip install accelerate
 pip install peft
-python fastdp.py
+
+python -m FastDP.fastdp
+

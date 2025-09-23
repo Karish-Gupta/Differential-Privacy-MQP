@@ -9,6 +9,8 @@
 #SBATCH -t 12:00:00                   # time limit of 3 hours
 #SBATCH --gres=gpu:H100:1             # request 1 H100 GPU
 
+cd $SLURM_SUBMIT_DIR/..
+
 module load python/3.11.10
 module load cuda/12.4.0/3mdaov5
 
@@ -25,4 +27,4 @@ pip install scikit-learn
 pip install sentencepiece
 pip install accelerate
 
-python flash.py
+python -m FlashDP.flash
