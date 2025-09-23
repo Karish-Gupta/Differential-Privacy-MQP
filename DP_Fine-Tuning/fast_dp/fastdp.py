@@ -221,7 +221,7 @@ class FastDPModel:
                   self.optimizer.zero_grad()
 
                running_loss += loss.item()
-               if step % 50 == 0:
+               if step % 500 == 0:
                   print(f"Epoch {epoch+1}, Step {step}, Loss {running_loss / (step+1):.4f}")
 
       # Detach privacy engine

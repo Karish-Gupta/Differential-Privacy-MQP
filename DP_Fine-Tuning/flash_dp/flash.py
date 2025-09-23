@@ -6,7 +6,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'flashdp'))
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 import torch
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader
 from transformers import AutoModelForCausalLM, AutoTokenizer, default_data_collator
 from transformers.utils import logging
 from datasets import load_dataset
@@ -58,67 +58,99 @@ class FlashDPModel:
         self.lora_target_modules = lora_target_modules
         self.lora_bias = lora_bias
 
-    def preprocess_dataset(self, subsample_size=5000, seed=101):
-        dataset = load_dataset("squad")
-        # Subsample for speed   
-        dataset["train"] = dataset["train"].shuffle(seed=seed).select(range(subsample_size))
-        dataset["validation"] = dataset["validation"].shuffle(seed=seed).select(range(subsample_size // 50))
+    def preprocess_dataset(self, train_size, eval_size, seed=101):
+        dataset = load_dataset(self.dataset_name)
 
-        def preprocess(example):
-            example["input_text"] = "Question: " + example["question"] + " Context: " + example["context"]
-            example["target_text"] = example["answers"]["text"][0] if len(example["answers"]["text"]) > 0 else ""
-            return example
+        dataset["train"] = dataset["train"].shuffle(seed=seed).select(range(train_size))
+        dataset["validation"] = dataset["validation"].shuffle(seed=seed).select(range(eval_size))
 
-        dataset = dataset.map(preprocess)
-
+        # Initialize tokenizer first
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
         self.tokenizer.pad_token = self.tokenizer.eos_token
         self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
 
-        def tokenize(example):
-            # Concatenate input and target for input_ids
-            input_text = example["input_text"]
-            target_text = example["target_text"]
-            full_text = input_text + self.tokenizer.eos_token + target_text + self.tokenizer.eos_token
+        def preprocess_and_tokenize_train(example):
+            input_text = "Context: " + example["context"] + " Question: " + example["question"] + " Answer: "
+            target_text = example["answers"]["text"][0] if len(example["answers"]["text"]) > 0 else ""
+            full_text = input_text + target_text
+            
             tokenized = self.tokenizer(
                 full_text,
-                max_length=self.max_length,
+                max_length=self.max_input_length + self.max_target_length,
+                truncation=True,
+                padding="max_length",
+            )
+
+            input_tokens = self.tokenizer(
+                input_text,
+                max_length=self.max_input_length,
+                truncation=True,
+                padding=False,
+                add_special_tokens=False
+            )
+            input_length = len(input_tokens["input_ids"])
+
+            labels = tokenized["input_ids"].copy()
+            labels[:input_length] = [-100] * input_length  # mask input
+            labels = [(l if l != self.tokenizer.pad_token_id else -100) for l in labels]
+
+            tokenized["labels"] = labels
+            return tokenized
+        
+        def preprocess_and_tokenize_eval(example):
+            # Prompt only (no gold answer appended to input_ids)
+            input_text = "Context: " + example["context"] + " Question: " + example["question"] + " Answer: "
+            target_text = example["answers"]["text"][0] if len(example["answers"]["text"]) > 0 else ""
+
+            # Tokenize prompt only for inputs
+            tokenized_inputs = self.tokenizer(
+                input_text,
+                max_length=self.max_input_length,
                 truncation=True,
                 padding="max_length"
             )
-            # Find split point
-            input_ids_input = self.tokenizer(
-                input_text + self.tokenizer.eos_token,
-                max_length=self.max_length,
+
+            # Tokenize full_text (with answer) just to build labels
+            tokenized_full = self.tokenizer(
+                input_text + target_text,
+                max_length=self.max_input_length + self.max_target_length,
                 truncation=True,
                 padding="max_length"
-            )["input_ids"]
-            input_len = sum([1 for t in input_ids_input if t != self.tokenizer.pad_token_id])
-            # Mask out input tokens in labels
-            labels = [-100] * input_len + tokenized["input_ids"][input_len:]
-            # For padding after full_text, also mask as -100
-            pad_start = len(labels)
-            if pad_start < self.max_length:
-                labels += [-100] * (self.max_length - pad_start)
-            tokenized["labels"] = labels[:self.max_length]
-            return {
-                "input_ids": tokenized["input_ids"],
-                "labels": tokenized["labels"],
-                "attention_mask": tokenized["attention_mask"]
-            }
+            )
 
-        dataset = dataset.map(tokenize, batched=False, remove_columns=dataset["train"].column_names)
+            # Mask out the input part, keep only the answer portion for labels
+            labels = tokenized_full["input_ids"].copy()
+            input_length = len(self.tokenizer(input_text, add_special_tokens=False)["input_ids"])
+            labels[:input_length] = [-100] * input_length
+            labels = [(l if l != self.tokenizer.pad_token_id else -100) for l in labels]
+
+            tokenized_inputs["labels"] = labels
+            
+            return tokenized_inputs
+
+        train_dataset = dataset["train"].map(
+            preprocess_and_tokenize_train,
+            batched=False,
+            remove_columns=dataset["train"].column_names,
+        )
+
+        eval_dataset = dataset["validation"].map(
+            preprocess_and_tokenize_eval, 
+            batched=False,
+            remove_columns=dataset["validation"].column_names
+        )
 
         self.train_loader = DataLoader(
-            dataset["train"],
+            train_dataset,
             batch_size=self.train_batch_size,
             shuffle=True,
-            collate_fn=default_data_collator
+            collate_fn=default_data_collator,
         )
+        
         self.val_loader = DataLoader(
-            dataset["validation"],
+            eval_dataset,
             batch_size=self.eval_batch_size,
-            collate_fn=default_data_collator
+            collate_fn=default_data_collator,
         )
 
     def estimate_noise_multiplier(self, target_epsilon, target_delta, epochs, batch_size, dataset_size):
@@ -138,22 +170,15 @@ class FlashDPModel:
         sigma = (q * math.sqrt(2 * steps * math.log(1/target_delta))) / target_epsilon
         return sigma
 
-    def init_model(self):
-        # HuggingFace authentication check
-        from transformers import pipeline
-        try:
-            _ = pipeline("text-generation", model=self.model_name)
-        except Exception as e:
-            print(f"\nERROR: Unable to access model '{self.model_name}'.\n"
-                  f"Make sure you have accepted the license at https://huggingface.co/{self.model_name} and are logged in.\n"
-                  f"Original error: {e}\n")
-            sys.exit(1)
+    def init_model(self):          
         self.model = AutoModelForCausalLM.from_pretrained(self.model_name, device_map="auto")
         self.model = self.model.to(torch.float32)
-        # Print model device map for verification
-        if hasattr(self.model, 'hf_device_map'):
-            print("[Device Map] Model loaded with device map:")
-            print(self.model.hf_device_map)
+        
+        # # Print model device map for verification
+        # if hasattr(self.model, 'hf_device_map'):
+        #     print("[Device Map] Model loaded with device map:")
+        #     print(self.model.hf_device_map)
+            
         # DP wrapping (before LoRA)
         # If dp_noise is not set, estimate it from target_epsilon
         if self.dp_noise is None and self.target_epsilon is not None:
@@ -165,6 +190,7 @@ class FlashDPModel:
                 dataset_size=len(self.train_loader.dataset)
             )
             print(f"[FlashDP] Estimated noise_multiplier for target_epsilon={self.target_epsilon}: {self.dp_noise}")
+            
         self.model = wrap_with_flashdp_layers(
             self.model,
             target_modules=[torch.nn.Linear],
@@ -239,6 +265,8 @@ if __name__ == "__main__":
     num_epochs = 5
     learning_rate = 2e-4
     max_length = 512
+    train_size = 5000
+    eval_size = 500
     dp_c = 1.0
     dp_noise = None  # Let the code compute noise_multiplier from target_epsilon
     # LoRA configs                      
@@ -274,11 +302,21 @@ if __name__ == "__main__":
     # Start GPU utilization logging using utils
     gpu_util_thread, gpu_util_stop_event, gpu_util_data = start_gpu_utilization_logging(interval=1.0)
 
-    try:
-        flashdp.preprocess_dataset()
-        flashdp.init_model()
-        flashdp.train()
-        flashdp.evaluate()
-    finally:
-        stop_gpu_utilization_logging(gpu_util_thread, gpu_util_stop_event)
-        print_gpu_utilization_summary(gpu_util_data)
+    flashdp.preprocess_dataset(train_size=train_size, eval_size=eval_size)
+    flashdp.init_model()
+    flashdp.train()
+    
+    print(f"Model: {model_name}")
+    print(f"Number of epochs: {num_epochs}")
+    print(f"Train batch size: {train_batch_size}")
+    print(f"Eval batch size: {eval_batch_size}")
+    print(f"Learning rate: {learning_rate}")
+    print(f"Max input length: {max_length}")
+    print(f"Max target length: {max_length}")
+    print(f"Traing size: {train_size}")
+    print(f"Eval size: {eval_size}")
+
+    flashdp.evaluate()
+    
+    stop_gpu_utilization_logging(gpu_util_thread, gpu_util_stop_event)
+    print_gpu_utilization_summary(gpu_util_data)
