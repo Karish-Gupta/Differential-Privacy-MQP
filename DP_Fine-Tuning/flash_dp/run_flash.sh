@@ -27,4 +27,4 @@ pip install scikit-learn
 pip install sentencepiece
 pip install accelerate
 
-python -m FlashDP.flash
+python -m flash_dp.flash

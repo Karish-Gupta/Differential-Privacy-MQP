@@ -14,6 +14,7 @@ cd $SLURM_SUBMIT_DIR/..
 module load python/3.10.2/mqmlxcf
 module load cuda/12.4.0/3mdaov5
 
+python -m venv env
 source env/bin/activate
 
 pip install --upgrade pip
@@ -28,5 +29,5 @@ pip install scikit-learn
 pip install accelerate
 pip install peft
 
-python -m FastDP.fastdp
+python -m fast_dp.fastdp
 

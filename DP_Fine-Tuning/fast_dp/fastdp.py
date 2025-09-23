@@ -29,6 +29,7 @@ class FastDPModel:
       max_input_length,
       max_target_length,
       target_epsilon,
+      train_size,
 
       lora_r=16,
       lora_alpha=16,
@@ -47,6 +48,7 @@ class FastDPModel:
       self.max_input_length = max_input_length
       self.max_target_length = max_target_length
       self.target_epsilon = target_epsilon
+      self.train_size = train_size
       self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
       # LoRA configs
@@ -68,6 +70,7 @@ class FastDPModel:
 
    def preprocess_dataset(self, train_size, eval_size, seed=101):
       dataset = load_dataset(self.dataset_name)
+      self.train_size = train_size
 
       dataset["train"] = dataset["train"].shuffle(seed=seed).select(range(train_size))
       dataset["validation"] = dataset["validation"].shuffle(seed=seed).select(range(eval_size))
@@ -187,7 +190,7 @@ class FastDPModel:
       self.privacy_engine = PrivacyEngine(
          self.model,
          batch_size=effective_batch_size,
-         sample_size=len(self.dataset["train"]),
+         sample_size=self.train_size,
          epochs=self.num_epochs,
          target_epsilon=self.target_epsilon,
          clipping_fn="automatic",
