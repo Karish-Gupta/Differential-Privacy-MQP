@@ -11,8 +11,9 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, default_data_colla
 from transformers.utils import logging
 from datasets import load_dataset
 from flashdp.api.wrap_model import wrap_with_flashdp_layers
-from utils import evaluate_exact_match, evaluate_f1, start_gpu_utilization_logging, stop_gpu_utilization_logging, print_gpu_utilization_summary
 from peft import LoraConfig, get_peft_model, TaskType  # Added for LoRA
+from ..utils.model_utils import *
+from ..utils.gpu_usage import *
 
 logging.set_verbosity_error()
 
@@ -217,21 +218,14 @@ class FlashDPModel:
             print("Validation loader not initialized. Run preprocess_dataset() first.")
             return
         model_device = next(self.model.parameters()).device
-        print("Evaluating with Exact Match metric from utils.py...")
-        evaluate_exact_match(
+        print("Evaluating...")
+        evaluate_model(
             self.model,
             self.val_loader,
             model_device,
             self.tokenizer,
-            max_gen_length=30
-        )
-        print("Evaluating with F1 Score metric from utils.py...")
-        evaluate_f1(
-            self.model,
-            self.val_loader,
-            model_device,
-            self.tokenizer,
-            max_gen_length=30
+            max_gen_length=10,
+            show_samples=10,
         )
 
 if __name__ == "__main__":

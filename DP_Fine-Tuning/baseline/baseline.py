@@ -5,7 +5,8 @@ from peft import LoraConfig, get_peft_model, TaskType
 from torch.utils.data import DataLoader
 from transformers import AutoModelForCausalLM, AutoTokenizer, default_data_collator
 from datasets import load_dataset
-from utils import *
+from ..utils.model_utils import *
+from ..utils.gpu_usage import *
 from huggingface_hub import login
 import os
 
@@ -59,12 +60,11 @@ class Baseline:
         self.model = None
         self.optimizer = None
 
-    def preprocess_dataset(self, subsample_size, seed=101):
+    def preprocess_dataset(self, train_size, eval_size, seed=101):
         dataset = load_dataset(self.dataset_name)
 
-        if subsample_size is not None:
-            dataset["train"] = dataset["train"].shuffle(seed=seed).select(range(subsample_size))
-            dataset["validation"] = dataset["validation"].shuffle(seed=seed).select(range(max(subsample_size // 10, 1)))
+        dataset["train"] = dataset["train"].shuffle(seed=seed).select(range(train_size))
+        dataset["validation"] = dataset["validation"].shuffle(seed=seed).select(range(eval_size))
 
         # Initialize tokenizer first
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
@@ -232,7 +232,8 @@ if __name__ == "__main__":
     max_input_length = 512
     max_target_length = 512
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    sample_size = 5000
+    train_size = 5000
+    eval_size = 500
 
     baseline_model = Baseline(
         model_name=model_name,
@@ -249,7 +250,7 @@ if __name__ == "__main__":
     # Start GPU utilization logging using utils
     gpu_util_thread, gpu_util_stop_event, gpu_util_data = start_gpu_utilization_logging(interval=1.0)
 
-    baseline_model.preprocess_dataset(subsample_size=sample_size, seed=101)
+    baseline_model.preprocess_dataset(train_size=train_size, eval_size=eval_size, seed=101)
     baseline_model.init_model()
     baseline_model.train()
 
@@ -261,7 +262,9 @@ if __name__ == "__main__":
     print(f"Learning rate: {learning_rate}")
     print(f"Max input length: {max_input_length}")
     print(f"Max target length: {max_target_length}")
-    print(f"Traing size: {sample_size}")
+    print(f"Traing size: {train_size}")
+    print(f"Eval size: {eval_size}")
+
 
     baseline_model.evaluate()
 

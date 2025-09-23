@@ -6,7 +6,8 @@ from torch.utils.data import DataLoader
 from transformers import AutoModelForCausalLM, AutoTokenizer, default_data_collator
 from datasets import load_dataset
 from fastDP import PrivacyEngine
-from utils import *
+from ..utils.model_utils import *
+from ..utils.gpu_usage import *
 from huggingface_hub import login
 import os
 
@@ -65,87 +66,100 @@ class FastDPModel:
       self.privacy_engine = None
 
 
-   def preprocess_dataset(self, subsample_size, seed=101):
+   def preprocess_dataset(self, train_size, eval_size, seed=101):
       dataset = load_dataset(self.dataset_name)
 
-      if subsample_size is not None:
-         dataset["train"] = dataset["train"].shuffle(seed=seed).select(range(subsample_size))
-         dataset["validation"] = dataset["validation"].shuffle(seed=seed).select(range(subsample_size // 10)) 
+      dataset["train"] = dataset["train"].shuffle(seed=seed).select(range(train_size))
+      dataset["validation"] = dataset["validation"].shuffle(seed=seed).select(range(eval_size))
 
       # Initialize tokenizer first
       self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
       self.tokenizer.pad_token = self.tokenizer.eos_token
       self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
 
-      def preprocess_and_tokenize(example):
-         # Create the full text sequence for causal LM
+      def preprocess_and_tokenize_train(example):
          input_text = "Context: " + example["context"] + " Question: " + example["question"] + " Answer: "
-         answer = example["answers"]["text"][0] if len(example["answers"]["text"]) > 0 else ""
-         target_text = answer + self.tokenizer.eos_token 
-         
-         # Combine into single sequence
+         target_text = example["answers"]["text"][0] if len(example["answers"]["text"]) > 0 else ""
          full_text = input_text + target_text
          
-         # Tokenize the entire sequence
          tokenized = self.tokenizer(
-            full_text,
-            max_length=self.max_input_length + self.max_target_length,
-            truncation=True,
-            padding="max_length",
-            return_tensors=None,
+               full_text,
+               max_length=self.max_input_length + self.max_target_length,
+               truncation=True,
+               padding="max_length",
          )
-         
-         # Create labels: -100 for input part, actual tokens for answer part
+
          input_tokens = self.tokenizer(
-            input_text,
-            max_length=self.max_input_length,
-            truncation=True,
-            padding=False,
-            return_tensors=None,
+               input_text,
+               max_length=self.max_input_length,
+               truncation=True,
+               padding=False,
+               add_special_tokens=False
          )
-         
          input_length = len(input_tokens["input_ids"])
-         labels = [-100] * input_length  # Mask the input part
-         
-         # Add the answer tokens as labels
-         answer_tokens = self.tokenizer(
-            target_text,
-            max_length=self.max_target_length,
-            truncation=True,
-            padding=False,
-            return_tensors=None,
-         )
-         
-         labels.extend(answer_tokens["input_ids"])
-         
-         # Pad labels to same length as input_ids
-         current_length = len(labels)
-         if current_length < len(tokenized["input_ids"]):
-            labels.extend([-100] * (len(tokenized["input_ids"]) - current_length))
-         else:
-            labels = labels[:len(tokenized["input_ids"])]
-         
+
+         labels = tokenized["input_ids"].copy()
+         labels[:input_length] = [-100] * input_length  # mask input
+         labels = [(l if l != self.tokenizer.pad_token_id else -100) for l in labels]
+
          tokenized["labels"] = labels
          return tokenized
+      
+      def preprocess_and_tokenize_eval(example):
+         # Prompt only (no gold answer appended to input_ids)
+         input_text = "Context: " + example["context"] + " Question: " + example["question"] + " Answer: "
+         target_text = example["answers"]["text"][0] if len(example["answers"]["text"]) > 0 else ""
 
-      self.dataset = dataset.map(
-         preprocess_and_tokenize, 
+         # Tokenize prompt only for inputs
+         tokenized_inputs = self.tokenizer(
+               input_text,
+               max_length=self.max_input_length,
+               truncation=True,
+               padding="max_length"
+         )
+
+         # Tokenize full_text (with answer) just to build labels
+         tokenized_full = self.tokenizer(
+               input_text + target_text,
+               max_length=self.max_input_length + self.max_target_length,
+               truncation=True,
+               padding="max_length"
+         )
+
+         # Mask out the input part, keep only the answer portion for labels
+         labels = tokenized_full["input_ids"].copy()
+         input_length = len(self.tokenizer(input_text, add_special_tokens=False)["input_ids"])
+         labels[:input_length] = [-100] * input_length
+         labels = [(l if l != self.tokenizer.pad_token_id else -100) for l in labels]
+
+         tokenized_inputs["labels"] = labels
+         
+         return tokenized_inputs
+
+      train_dataset = dataset["train"].map(
+         preprocess_and_tokenize_train,
          batched=False,
-         remove_columns=dataset["train"].column_names
+         remove_columns=dataset["train"].column_names,
+      )
+
+      eval_dataset = dataset["validation"].map(
+         preprocess_and_tokenize_eval, 
+         batched=False,
+         remove_columns=dataset["validation"].column_names
       )
 
       self.train_loader = DataLoader(
-         self.dataset["train"],
+         train_dataset,
          batch_size=self.train_batch_size,
          shuffle=True,
-         collate_fn=default_data_collator
+         collate_fn=default_data_collator,
       )
+      
       self.val_loader = DataLoader(
-         self.dataset["validation"],
+         eval_dataset,
          batch_size=self.eval_batch_size,
-         collate_fn=default_data_collator
+         collate_fn=default_data_collator,
       )
-
 
    def init_model(self):
       self.model = AutoModelForCausalLM.from_pretrained(self.model_name, device_map="cuda:0")
@@ -248,6 +262,9 @@ if __name__ == "__main__":
    max_target_length = 512
    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
    target_epsilon = 8.0
+   train_size = 5000
+   eval_size = 500
+
 
    fastdp = FastDPModel(
          model_name=model_name,
@@ -265,7 +282,7 @@ if __name__ == "__main__":
    # Start GPU utilization logging using utils
    gpu_util_thread, gpu_util_stop_event, gpu_util_data = start_gpu_utilization_logging(interval=1.0)
 
-   fastdp.preprocess_dataset(subsample_size=5000, seed=101)
+   fastdp.preprocess_dataset(train_size=train_size, eval_size=eval_size, seed=101)
    fastdp.init_model()
    fastdp.train()
    
@@ -277,8 +294,9 @@ if __name__ == "__main__":
    print(f"Learning rate: {learning_rate}")
    print(f"Max input length: {max_input_length}")
    print(f"Max target length: {max_target_length}")
-   print(f"Traing size: {5000}")
-
+   print(f"Traing size: {sample_size}")
+   print(f"Traing size: {train_size}")
+   print(f"Eval size: {eval_size}")
    fastdp.evaluate()
 
    # Ouput GPU logging

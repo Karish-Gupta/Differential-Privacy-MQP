@@ -4,7 +4,8 @@ import tqdm
 from torch.utils.data import DataLoader
 from transformers import AutoModelForCausalLM, AutoTokenizer, default_data_collator
 from datasets import load_dataset
-from utils import *
+from ..utils.model_utils import *
+from ..utils.gpu_usage import *
 from huggingface_hub import login
 import os
 
@@ -121,7 +122,8 @@ if __name__ == "__main__":
     max_input_length = 512
     max_target_length = 512
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    sample_size = 5000
+    train_size = 5000
+    eval_size = 500
 
 
     baseline_model_noFT = Baseline_no_fine_tuning(
@@ -135,7 +137,7 @@ if __name__ == "__main__":
     # Start GPU utilization logging using utils
     gpu_util_thread, gpu_util_stop_event, gpu_util_data = start_gpu_utilization_logging(interval=1.0)
 
-    baseline_model_noFT.preprocess_dataset(subsample_size=sample_size, seed=101)
+    baseline_model_noFT.preprocess_dataset(train_size=train_size, eval_size=eval_size, seed=101)
     baseline_model_noFT.init_model()
 
     print(f"Model: {model_name}")
@@ -143,8 +145,8 @@ if __name__ == "__main__":
     print(f"Eval batch size: {eval_batch_size}")
     print(f"Max input length: {max_input_length}")
     print(f"Max target length: {max_target_length}")
-    print(f"Traing size: {sample_size}")
-
+    print(f"Traing size: {train_size}")
+    print(f"Eval size: {eval_size}")
     baseline_model_noFT.evaluate()
 
     # Output GPU logging
