@@ -5,7 +5,8 @@ from peft import LoraConfig, get_peft_model, TaskType
 from torch.utils.data import DataLoader
 from transformers import AutoModelForCausalLM, AutoTokenizer, default_data_collator
 from datasets import load_dataset
-from utils import *
+from utils.model_utils import *
+from utils.gpu_usage import *
 from huggingface_hub import login
 import os
 
@@ -53,93 +54,103 @@ class Baseline:
         self.lora_bias = lora_bias
 
         # Setup
-        self.dataset = None
         self.tokenizer = None
         self.train_loader = None
         self.val_loader = None
         self.model = None
         self.optimizer = None
-        self.privacy_engine = None
 
-    def preprocess_dataset(self, subsample_size, seed=101):
+    def preprocess_dataset(self, train_size, eval_size, seed=101):
         dataset = load_dataset(self.dataset_name)
 
-        if subsample_size is not None:
-            dataset["train"] = dataset["train"].shuffle(seed=seed).select(range(subsample_size))
-            dataset["validation"] = dataset["validation"].shuffle(seed=seed).select(range(subsample_size // 10))
+        dataset["train"] = dataset["train"].shuffle(seed=seed).select(range(train_size))
+        dataset["validation"] = dataset["validation"].shuffle(seed=seed).select(range(eval_size))
 
         # Initialize tokenizer first
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
         self.tokenizer.pad_token = self.tokenizer.eos_token
         self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
 
-        def preprocess_and_tokenize(example):
-            # Compose input and target for SQuAD v1 format
-            title = example.get('title', None)
-            input_text = ""
-            if title:
-                input_text += f"Title: {title} "
-            input_text += f"Question: {example['question']} Context: {example['context']} Answer:"
-            answer = example["answers"]["text"][0] if len(example["answers"]["text"]) > 0 else ""
-            eos_token = self.tokenizer.eos_token if self.tokenizer.eos_token else "<|eos|>"
-            target_text = answer + eos_token
-
-            # Tokenize input and answer separately (no padding)
-            input_tokens = self.tokenizer(
-                input_text,
-                add_special_tokens=False,
-                truncation=True,
-                max_length=self.max_input_length,
-                return_tensors=None,
-            )
-            answer_tokens = self.tokenizer(
-                target_text,
-                add_special_tokens=False,
-                truncation=True,
-                max_length=self.max_target_length,
-                return_tensors=None,
-            )
-
-            # Build full sequence and tokenize (for input_ids)
+        def preprocess_and_tokenize_train(example):
+            input_text = "Context: " + example["context"] + " Question: " + example["question"] + " Answer: "
+            target_text = example["answers"]["text"][0] if len(example["answers"]["text"]) > 0 else ""
             full_text = input_text + target_text
+            
             tokenized = self.tokenizer(
                 full_text,
-                add_special_tokens=False,
-                truncation=True,
                 max_length=self.max_input_length + self.max_target_length,
+                truncation=True,
                 padding="max_length",
-                return_tensors=None,
             )
 
+            input_tokens = self.tokenizer(
+                input_text,
+                max_length=self.max_input_length,
+                truncation=True,
+                padding=False,
+                add_special_tokens=False
+            )
             input_length = len(input_tokens["input_ids"])
-            answer_length = len(answer_tokens["input_ids"])
 
-            # Labels: -100 for input, answer tokens for answer
-            labels = [-100] * input_length + answer_tokens["input_ids"]
-            # Pad or truncate labels to match input_ids length
-            labels = labels[:len(tokenized["input_ids"])]
-            if len(labels) < len(tokenized["input_ids"]):
-                labels += [-100] * (len(tokenized["input_ids"]) - len(labels))
+            labels = tokenized["input_ids"].copy()
+            labels[:input_length] = [-100] * input_length  # mask input
+            labels = [(l if l != self.tokenizer.pad_token_id else -100) for l in labels]
 
             tokenized["labels"] = labels
-
-            # ...no debug prints...
             return tokenized
+        
+        def preprocess_and_tokenize_eval(example):
+            # Prompt only (no gold answer appended to input_ids)
+            input_text = "Context: " + example["context"] + " Question: " + example["question"] + " Answer: "
+            target_text = example["answers"]["text"][0] if len(example["answers"]["text"]) > 0 else ""
 
-        self.dataset = dataset.map(
-            preprocess_and_tokenize,
+            # Tokenize prompt only for inputs
+            tokenized_inputs = self.tokenizer(
+                input_text,
+                max_length=self.max_input_length,
+                truncation=True,
+                padding="max_length"
+            )
+
+            # Tokenize full_text (with answer) just to build labels
+            tokenized_full = self.tokenizer(
+                input_text + target_text,
+                max_length=self.max_input_length + self.max_target_length,
+                truncation=True,
+                padding="max_length"
+            )
+
+            # Mask out the input part, keep only the answer portion for labels
+            labels = tokenized_full["input_ids"].copy()
+            input_length = len(self.tokenizer(input_text, add_special_tokens=False)["input_ids"])
+            labels[:input_length] = [-100] * input_length
+            labels = [(l if l != self.tokenizer.pad_token_id else -100) for l in labels]
+
+            tokenized_inputs["labels"] = labels
+            
+            return tokenized_inputs
+
+        train_dataset = dataset["train"].map(
+            preprocess_and_tokenize_train,
             batched=False,
             remove_columns=dataset["train"].column_names,
         )
 
+        eval_dataset = dataset["validation"].map(
+            preprocess_and_tokenize_eval, 
+            batched=False,
+            remove_columns=dataset["validation"].column_names
+        )
+
         self.train_loader = DataLoader(
-            self.dataset["train"],
+            train_dataset,
             batch_size=self.train_batch_size,
             shuffle=True,
             collate_fn=default_data_collator,
         )
+        
         self.val_loader = DataLoader(
-            self.dataset["validation"],
+            eval_dataset,
             batch_size=self.eval_batch_size,
             collate_fn=default_data_collator,
         )
@@ -184,7 +195,7 @@ class Baseline:
                     self.optimizer.zero_grad()
 
                 running_loss += loss.item()
-                if step % 50 == 0:
+                if step % 500 == 0:
                     print(f"Epoch {epoch+1}, Step {step}, Loss {running_loss / (step+1):.4f}")
 
 
@@ -204,15 +215,15 @@ class Baseline:
             self.val_loader,
             model_device,
             self.tokenizer,
-            max_gen_length=30,
+            max_gen_length=10,
             show_samples=10,
         )
 
 
 if __name__ == "__main__":
     # Model Configs
-    model_name = "meta-llama/Llama-3.1-8B"
-    dataset_name = "rajpurkar/squad"
+    model_name = "meta-llama/Meta-Llama-3-8B-Instruct"
+    dataset_name = "squad"
     train_batch_size = 1
     eval_batch_size = 1
     gradient_accumulation_steps = 8
@@ -221,6 +232,8 @@ if __name__ == "__main__":
     max_input_length = 512
     max_target_length = 512
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    train_size = 5000
+    eval_size = 500
 
     baseline_model = Baseline(
         model_name=model_name,
@@ -237,7 +250,7 @@ if __name__ == "__main__":
     # Start GPU utilization logging using utils
     gpu_util_thread, gpu_util_stop_event, gpu_util_data = start_gpu_utilization_logging(interval=1.0)
 
-    baseline_model.preprocess_dataset(subsample_size=2500, seed=101)
+    baseline_model.preprocess_dataset(train_size=train_size, eval_size=eval_size, seed=101)
     baseline_model.init_model()
     baseline_model.train()
 
@@ -249,7 +262,9 @@ if __name__ == "__main__":
     print(f"Learning rate: {learning_rate}")
     print(f"Max input length: {max_input_length}")
     print(f"Max target length: {max_target_length}")
-    print(f"Traing size: {5000}")
+    print(f"Traing size: {train_size}")
+    print(f"Eval size: {eval_size}")
+
 
     baseline_model.evaluate()
 
