@@ -68,8 +68,8 @@ def evaluate_model(model, val_loader, device, tokenizer, max_gen_length=50, show
             ref = tokenizer.decode(answer_ids, skip_special_tokens=True).strip()
             
             # Cut off everything before "Answer: "
-            if "Answer:" in pred:
-                pred = pred.split("Answer:", 1)[1].strip()
+            # if "Answer:" in pred:
+            #     pred = pred.split("Answer:", 1)[1].strip()
 
             preds.append(pred)
             refs.append(ref)

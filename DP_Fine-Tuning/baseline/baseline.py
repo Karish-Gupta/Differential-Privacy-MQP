@@ -73,7 +73,7 @@ class Baseline:
 
         def preprocess_and_tokenize_train(example):
             messages = [
-                {"role": "system", "content": "You are a helpful assistant. Respond only with the answer."},
+                {"role": "system", "content": "You are a knowledgeable, efficient, and direct AI assistant. Provide concise answers, in format Answer: {answer}"},
                 {"role": "user", "content": f"Context: {example['context']} Question: {example['question']}"}
             ]
             input_text = self.tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
@@ -105,7 +105,7 @@ class Baseline:
         
         def preprocess_and_tokenize_eval(example):
             messages = [
-                {"role": "system", "content": "You are a helpful assistant. Respond only with the answer."},
+                {"role": "system", "content": "You are a knowledgeable, efficient, and direct AI assistant. Provide concise answers, in format Answer: {answer}"},
                 {"role": "user", "content": f"Context: {example['context']} Question: {example['question']}"}
             ]
             input_text = self.tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
@@ -222,7 +222,7 @@ class Baseline:
             self.val_loader,
             model_device,
             self.tokenizer,
-            max_gen_length=10,
+            max_gen_length=60,
             show_samples=10,
         )
 
