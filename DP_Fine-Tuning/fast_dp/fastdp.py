@@ -81,7 +81,11 @@ class FastDPModel:
       self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
 
       def preprocess_and_tokenize_train(example):
-         input_text = "Context: " + example["context"] + " Question: " + example["question"] + " Answer: "
+         messages = [
+            {"role": "system", "content": "You are a helpful assistant. Respond only with the answer."},
+            {"role": "user", "content": f"Context: {example['context']} Question: {example['question']}"}
+         ]
+         input_text = self.tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
          target_text = example["answers"]["text"][0] if len(example["answers"]["text"]) > 0 else ""
          full_text = input_text + target_text
          
@@ -109,8 +113,11 @@ class FastDPModel:
          return tokenized
       
       def preprocess_and_tokenize_eval(example):
-         # Prompt only (no gold answer appended to input_ids)
-         input_text = "Context: " + example["context"] + " Question: " + example["question"] + " Answer: "
+         messages = [
+            {"role": "system", "content": "You are a helpful assistant. Respond only with the answer."},
+            {"role": "user", "content": f"Context: {example['context']} Question: {example['question']}"}
+         ]
+         input_text = self.tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
          target_text = example["answers"]["text"][0] if len(example["answers"]["text"]) > 0 else ""
 
          # Tokenize prompt only for inputs

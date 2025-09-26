@@ -31,7 +31,7 @@ class FlashDPModel:
         target_epsilon=8.0,
         target_delta=1e-5,
         lora_r=16,
-        lora_alpha=32,
+        lora_alpha=16,
         lora_dropout=0.05,
         lora_target_modules=None,
         lora_bias="none",
