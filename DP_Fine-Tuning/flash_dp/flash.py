@@ -85,7 +85,11 @@ class FlashDPModel:
         self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
 
         def preprocess_and_tokenize_train(example):
-            input_text = "Context: " + example["context"] + " Question: " + example["question"] + " Answer: "
+            messages = [
+                {"role": "system", "content": "You are a knowledgeable, efficient, and direct AI assistant. Provide concise answers, in format Answer: {answer}"},
+                {"role": "user", "content": f"Context: {example['context']} Question: {example['question']}"}
+            ]
+            input_text = self.tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
             target_text = example["answers"]["text"][0] if len(example["answers"]["text"]) > 0 else ""
             full_text = input_text + target_text
             
@@ -113,8 +117,11 @@ class FlashDPModel:
             return tokenized
         
         def preprocess_and_tokenize_eval(example):
-            # Prompt only (no gold answer appended to input_ids)
-            input_text = "Context: " + example["context"] + " Question: " + example["question"] + " Answer: "
+            messages = [
+                {"role": "system", "content": "You are a knowledgeable, efficient, and direct AI assistant. Provide concise answers, in format Answer: {answer}"},
+                {"role": "user", "content": f"Context: {example['context']} Question: {example['question']}"}
+            ]
+            input_text = self.tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
             target_text = example["answers"]["text"][0] if len(example["answers"]["text"]) > 0 else ""
 
             # Tokenize prompt only for inputs
@@ -274,7 +281,7 @@ class FlashDPModel:
             self.val_loader,
             model_device,
             self.tokenizer,
-            max_gen_length=30,
+            max_gen_length=60, # Make 60????
             show_samples=10
         )
 
@@ -289,8 +296,8 @@ if __name__ == "__main__":
     gradient_accumulation_steps = 8
     num_epochs = 5
     learning_rate = 2e-4
-    max_input_length = 2048
-    max_target_length = 1024
+    max_input_length = 512
+    max_target_length = 512
     train_size = 5000  # Match baseline and fastdp
     eval_size = 500
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
