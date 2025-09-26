@@ -106,7 +106,7 @@ class Baseline:
         def preprocess_and_tokenize_eval(example):
             messages = [
                 {"role": "system", "content": "You are a helpful assistant. Respond only with the answer."},
-                {"role": "user", "content": f"Context: {example['context']} Question: {example['question']} Answer: "}
+                {"role": "user", "content": f"Context: {example['context']} Question: {example['question']}"}
             ]
             input_text = self.tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
             target_text = example["answers"]["text"][0] if len(example["answers"]["text"]) > 0 else ""
