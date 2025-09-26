@@ -1,6 +1,7 @@
 import numpy as np
 import torch
 import tqdm
+import sys
 from peft import LoraConfig, get_peft_model, TaskType
 from torch.utils.data import DataLoader
 from transformers import AutoModelForCausalLM, AutoTokenizer, default_data_collator
@@ -165,7 +166,8 @@ class FastDPModel:
       )
 
    def init_model(self):
-      self.model = AutoModelForCausalLM.from_pretrained(self.model_name, device_map="cuda:0")
+      # Load model with automatic device mapping for multi-GPU support
+      self.model = AutoModelForCausalLM.from_pretrained(self.model_name, device_map="auto")
       self.model = self.model.to(torch.float16)
       self.model.gradient_checkpointing_enable()
 
@@ -205,6 +207,10 @@ class FastDPModel:
 
    def train(self):
       self.model.train()
+      model_device = next(self.model.parameters()).device
+      model_dtype = next(self.model.parameters()).dtype
+      print(f"Model is using device: {model_device}, dtype: {model_dtype}")
+      
       for epoch in range(self.num_epochs):
          running_loss = 0.0
          for step, batch in enumerate(self.train_loader):
@@ -267,6 +273,12 @@ if __name__ == "__main__":
    target_epsilon = 8.0
    train_size = 5000
    eval_size = 500
+
+   if torch.cuda.device_count() == 0:
+      print("ERROR: FastDP requires a CUDA-enabled GPU to run.")
+      print("Please run this script on a machine with a CUDA GPU and the correct CUDA drivers installed.")
+      sys.exit(1)
+   print(f"Using {torch.cuda.device_count()} GPU(s).")
 
 
    fastdp = FastDPModel(
