@@ -7,7 +7,7 @@
 #SBATCH -e fastdp_run_%j.err         # name of the error file
 #SBATCH -p short                      # partition to submit to
 #SBATCH -t 12:00:00                   # time limit of 12 hours
-#SBATCH --gres=gpu:H200:1             # request 1 H200 GPU
+#SBATCH --gres=gpu:H100:1             # request 1 H200 GPU
 
 cd $SLURM_SUBMIT_DIR/..
 
