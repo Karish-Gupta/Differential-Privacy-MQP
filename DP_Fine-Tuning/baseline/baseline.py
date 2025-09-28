@@ -222,7 +222,7 @@ class Baseline:
             self.val_loader,
             model_device,
             self.tokenizer,
-            max_gen_length=60,
+            max_gen_length=64,
             show_samples=10,
         )
 
@@ -231,8 +231,8 @@ if __name__ == "__main__":
     # Model Configs
     model_name = "meta-llama/Meta-Llama-3-8B-Instruct"
     dataset_name = "squad"
-    train_batch_size = 1
-    eval_batch_size = 1
+    train_batch_size = 4
+    eval_batch_size = 4
     gradient_accumulation_steps = 8
     num_epochs = 5
     learning_rate = 2e-4
