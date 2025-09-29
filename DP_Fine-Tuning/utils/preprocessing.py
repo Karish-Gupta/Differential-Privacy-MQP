@@ -39,11 +39,12 @@ def preprocess_dataset(
    dataset = load_dataset(dataset_name)
    dataset["train"] = dataset["train"].shuffle(seed=seed).select(range(train_size))
    dataset["validation"] = dataset["validation"].shuffle(seed=seed).select(range(eval_size))
+   system_prompt = "You are a knowledgeable, concise, and direct AI assistant. Provide just the short answer and nothing else."
 
    # Train tokenizer
    def tokenize_train(example):
       messages = [
-         {"role": "system", "content": "You are a knowledgeable, efficient, and direct AI assistant. Provide just the answer."},
+         {"role": "system", "content": {system_prompt}},
          {"role": "user", "content": f"Context: {example['context']} Question: {example['question']}"}
       ]
 
@@ -88,7 +89,7 @@ def preprocess_dataset(
    # Eval tokenizer
    def tokenize_eval(example):
       messages = [
-         {"role": "system", "content": "You are a knowledgeable, efficient, and direct AI assistant. Provide just the answer."},
+         {"role": "system", "content": {system_prompt}},
          {"role": "user", "content": f"Context: {example['context']} Question: {example['question']}"}
       ]
 

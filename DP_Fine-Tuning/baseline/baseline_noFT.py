@@ -51,7 +51,8 @@ class Baseline_no_fine_tuning:
         # Eval tokenizer
         def tokenize_eval(example):
             messages = [
-                {"role": "system", "content": "You are a knowledgeable, efficient, and direct AI assistant. Provide just the answer."},
+                {"role": "system", "content": "You are a knowledgeable, concise, and direct AI assistant. Provide just the short answer and nothing else."
+},
                 {"role": "user", "content": f"Context: {example['context']} Question: {example['question']}"}
             ]
 
@@ -105,7 +106,7 @@ class Baseline_no_fine_tuning:
             self.val_loader,
             model_device,
             self.tokenizer,
-            max_gen_length=10,
+            max_gen_length=64,
             show_samples=10,
         )
 
@@ -114,7 +115,7 @@ if __name__ == "__main__":
     # Model Configs
     model_name = "meta-llama/Meta-Llama-3-8B-Instruct"
     dataset_name = "squad"
-    eval_batch_size = 1
+    eval_batch_size = 8
     max_input_length = 512
     max_target_length = 512
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
