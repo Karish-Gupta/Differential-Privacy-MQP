@@ -1,6 +1,25 @@
+import torch
 from datasets import load_dataset
 from torch.utils.data import DataLoader
 from transformers import default_data_collator
+from torch.utils.data import DataLoader
+
+def collate_eval(batch):
+    """
+    Collate function that keeps the target_text as a list, while batching input_ids etc.
+    """
+    input_ids = torch.stack([b["input_ids"] for b in batch])
+    attention_mask = torch.stack([b["attention_mask"] for b in batch])
+
+    # Keep target_text as a list
+    target_texts = [b["target_text"] for b in batch]
+
+    return {
+        "input_ids": input_ids,
+        "attention_mask": attention_mask,
+        "target_texts": target_texts
+    }
+
 
 def preprocess_dataset(
    tokenizer,
@@ -130,7 +149,7 @@ def preprocess_dataset(
    val_loader = DataLoader(
       eval_dataset, 
       batch_size=eval_batch_size, 
-      collate_fn=default_data_collator
+      collate_fn=collate_eval
    )
 
    return train_loader, val_loader
