@@ -221,6 +221,8 @@ if __name__ == "__main__":
    print(f"Max target length: {max_target_length}")
    print(f"Traing size: {train_size}")
    print(f"Eval size: {eval_size}")
+   print(f"Epsilon: {target_epsilon}")
+   
    fastdp.evaluate()
 
    # Ouput GPU logging

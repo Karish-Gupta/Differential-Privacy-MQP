@@ -6,6 +6,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, default_data_colla
 from datasets import load_dataset
 from utils.model_utils import *
 from utils.gpu_usage import *
+from utils.preprocessing import collate_eval
 from huggingface_hub import login
 import os
 
@@ -47,49 +48,47 @@ class Baseline_no_fine_tuning:
         self.tokenizer.pad_token = self.tokenizer.eos_token
         self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
                 
-        def preprocess_and_tokenize_eval(example):
-            # Prompt only (no gold answer appended to input_ids)
-            input_text = "Context: " + example["context"] + " Question: " + example["question"] + " Answer: "
-            target_text = example["answers"]["text"][0] if len(example["answers"]["text"]) > 0 else ""
+        # Eval tokenizer
+        def tokenize_eval(example):
+            messages = [
+                {"role": "system", "content": "You are a knowledgeable, efficient, and direct AI assistant. Provide just the answer."},
+                {"role": "user", "content": f"Context: {example['context']} Question: {example['question']}"}
+            ]
 
-            # Tokenize prompt only for inputs
-            tokenized_inputs = self.tokenizer(
-                input_text,
-                max_length=self.max_input_length,
-                truncation=True,
-                padding="max_length"
+            # Get input text
+            input_text = self.tokenizer.apply_chat_template(
+                messages, 
+                add_generation_prompt=True, 
+                tokenize=False
             )
 
-            # Tokenize full_text (with answer) just to build labels
-            tokenized_full = self.tokenizer(
-                input_text + target_text,
-                max_length=self.max_input_length + self.max_target_length,
-                truncation=True,
-                padding="max_length"
+            # Tokenize input only
+            tokenized = self.tokenizer(
+                input_text, 
+                max_length=max_input_length, 
+                truncation=True, 
+                padding="max_length", 
+                add_special_tokens=False
             )
 
-            # Mask out the input part, keep only the answer portion for labels
-            labels = tokenized_full["input_ids"].copy()
-            input_length = len(self.tokenizer(input_text, add_special_tokens=False)["input_ids"])
-            labels[:input_length] = [-100] * input_length
-            labels = [(l if l != self.tokenizer.pad_token_id else -100) for l in labels]
+            # Store the target answer for evaluation metrics (but don't include in labels)
+            target_text = example["answers"]["text"][0] if example["answers"]["text"] else ""
+            tokenized["target_text"] = target_text
 
-            tokenized_inputs["labels"] = labels
-            
-            return tokenized_inputs
-
-
+            return tokenized
+        
         eval_dataset = dataset["validation"].map(
-            preprocess_and_tokenize_eval, 
-            batched=False,
+            tokenize_eval, 
+            batched=False, 
             remove_columns=dataset["validation"].column_names
         )
-        
+
         self.val_loader = DataLoader(
-            eval_dataset,
-            batch_size=self.eval_batch_size,
-            collate_fn=default_data_collator,
+            eval_dataset, 
+            batch_size=eval_batch_size, 
+            collate_fn=collate_eval
         )
+        
 
     def init_model(self):
         self.model = AutoModelForCausalLM.from_pretrained(self.model_name, device_map="cuda:0")
