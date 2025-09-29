@@ -1,3 +1,4 @@
+import re
 import numpy as np
 import torch
 from tqdm import tqdm
@@ -65,9 +66,8 @@ def evaluate_model(model, val_loader, device, tokenizer, max_gen_length=50, show
             # Get reference from target_text
             ref = target_texts[i].strip()
             
-            # # Cut off everything before "Answer: "
-            # if "Answer:" in pred:
-            #     pred = pred.split("Answer:", 1)[1].strip()
+            # Remove leading "assistant" (case-insensitive, with optional colon or newline)
+            pred = re.sub(r"^(assistant[:\s]*)", "", pred, flags=re.IGNORECASE)
 
             preds.append(pred)
             refs.append(ref)

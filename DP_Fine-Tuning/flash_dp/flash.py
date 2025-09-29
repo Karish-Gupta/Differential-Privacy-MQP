@@ -14,6 +14,7 @@ from flashdp.api.wrap_model import wrap_with_flashdp_layers
 from peft import LoraConfig, get_peft_model, TaskType  # Added for LoRA
 from utils.model_utils import *
 from utils.gpu_usage import *
+from utils.preprocessing import preprocess_dataset
 
 logging.set_verbosity_error()
 
@@ -59,98 +60,22 @@ class FlashDPModel:
         self.lora_bias = lora_bias
 
     def preprocess_dataset(self, train_size, eval_size, seed=101):
-        dataset = load_dataset(self.dataset_name)
-
-        dataset["train"] = dataset["train"].shuffle(seed=seed).select(range(train_size))
-        dataset["validation"] = dataset["validation"].shuffle(seed=seed).select(range(eval_size))
-
-        # Initialize tokenizer first
+        # Initialize tokenizer
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
         self.tokenizer.pad_token = self.tokenizer.eos_token
         self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
 
-        def preprocess_and_tokenize_train(example):
-            input_text = "Context: " + example["context"] + " Question: " + example["question"] + " Answer: "
-            target_text = example["answers"]["text"][0] if len(example["answers"]["text"]) > 0 else ""
-            full_text = input_text + target_text
-            
-            tokenized = self.tokenizer(
-                full_text,
-                max_length=self.max_input_length + self.max_target_length,
-                truncation=True,
-                padding="max_length",
-            )
-
-            input_tokens = self.tokenizer(
-                input_text,
-                max_length=self.max_input_length,
-                truncation=True,
-                padding=False,
-                add_special_tokens=False
-            )
-            input_length = len(input_tokens["input_ids"])
-
-            labels = tokenized["input_ids"].copy()
-            labels[:input_length] = [-100] * input_length  # mask input
-            labels = [(l if l != self.tokenizer.pad_token_id else -100) for l in labels]
-
-            tokenized["labels"] = labels
-            return tokenized
-        
-        def preprocess_and_tokenize_eval(example):
-            # Prompt only (no gold answer appended to input_ids)
-            input_text = "Context: " + example["context"] + " Question: " + example["question"] + " Answer: "
-            target_text = example["answers"]["text"][0] if len(example["answers"]["text"]) > 0 else ""
-
-            # Tokenize prompt only for inputs
-            tokenized_inputs = self.tokenizer(
-                input_text,
-                max_length=self.max_input_length,
-                truncation=True,
-                padding="max_length"
-            )
-
-            # Tokenize full_text (with answer) just to build labels
-            tokenized_full = self.tokenizer(
-                input_text + target_text,
-                max_length=self.max_input_length + self.max_target_length,
-                truncation=True,
-                padding="max_length"
-            )
-
-            # Mask out the input part, keep only the answer portion for labels
-            labels = tokenized_full["input_ids"].copy()
-            input_length = len(self.tokenizer(input_text, add_special_tokens=False)["input_ids"])
-            labels[:input_length] = [-100] * input_length
-            labels = [(l if l != self.tokenizer.pad_token_id else -100) for l in labels]
-
-            tokenized_inputs["labels"] = labels
-            
-            return tokenized_inputs
-
-        train_dataset = dataset["train"].map(
-            preprocess_and_tokenize_train,
-            batched=False,
-            remove_columns=dataset["train"].column_names,
-        )
-
-        eval_dataset = dataset["validation"].map(
-            preprocess_and_tokenize_eval, 
-            batched=False,
-            remove_columns=dataset["validation"].column_names
-        )
-
-        self.train_loader = DataLoader(
-            train_dataset,
-            batch_size=self.train_batch_size,
-            shuffle=True,
-            collate_fn=default_data_collator,
-        )
-        
-        self.val_loader = DataLoader(
-            eval_dataset,
-            batch_size=self.eval_batch_size,
-            collate_fn=default_data_collator,
+        # Call the external preprocessing function
+        self.train_loader, self.val_loader = preprocess_dataset(
+            tokenizer=self.tokenizer,
+            dataset_name=self.dataset_name,
+            train_size=train_size,
+            eval_size=eval_size,
+            max_input_length=self.max_input_length,
+            max_target_length=self.max_target_length,
+            train_batch_size=self.train_batch_size,
+            eval_batch_size=self.eval_batch_size,
+            seed=seed
         )
 
     def estimate_noise_multiplier(self, target_epsilon, target_delta, epochs, batch_size, dataset_size):
@@ -250,7 +175,7 @@ class FlashDPModel:
             self.val_loader,
             model_device,
             self.tokenizer,
-            max_gen_length=10,
+            max_gen_length=64,
             show_samples=10,
         )
 
@@ -260,8 +185,8 @@ if __name__ == "__main__":
     target_epsilon = 8.0  # Set desired epsilon 
     target_delta = 1e-5   # Set desired delta 
     model_name = "mlabonne/Meta-Llama-3-8B"
-    train_batch_size = 1
-    eval_batch_size = 1
+    train_batch_size = 4
+    eval_batch_size = 4
     num_epochs = 5
     learning_rate = 2e-4
     max_length = 512
@@ -315,6 +240,7 @@ if __name__ == "__main__":
     print(f"Max target length: {max_length}")
     print(f"Traing size: {train_size}")
     print(f"Eval size: {eval_size}")
+    print(f"Epsilon: {target_epsilon}")
 
     flashdp.evaluate()
     
