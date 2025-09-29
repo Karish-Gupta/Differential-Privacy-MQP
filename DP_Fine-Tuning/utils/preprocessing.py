@@ -43,7 +43,7 @@ def preprocess_dataset(
    # Train tokenizer
    def tokenize_train(example):
       messages = [
-         {"role": "system", "content": "You are a knowledgeable, efficient, and direct AI assistant. Provide concise answers."},
+         {"role": "system", "content": "You are a knowledgeable, efficient, and direct AI assistant. Provide just the answer."},
          {"role": "user", "content": f"Context: {example['context']} Question: {example['question']}"}
       ]
 
@@ -88,7 +88,7 @@ def preprocess_dataset(
    # Eval tokenizer
    def tokenize_eval(example):
       messages = [
-         {"role": "system", "content": "You are a knowledgeable, efficient, and direct AI assistant. Provide concise answers."},
+         {"role": "system", "content": "You are a knowledgeable, efficient, and direct AI assistant. Provide just the answer."},
          {"role": "user", "content": f"Context: {example['context']} Question: {example['question']}"}
       ]
 
