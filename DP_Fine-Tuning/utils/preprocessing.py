@@ -8,17 +8,17 @@ def collate_eval(batch):
     """
     Collate function that keeps the target_text as a list, while batching input_ids etc.
     """
-    input_ids = torch.stack([b["input_ids"] for b in batch])
-    attention_mask = torch.stack([b["attention_mask"] for b in batch])
+    input_ids = torch.stack([torch.tensor(b["input_ids"]) for b in batch])
+    attention_mask = torch.stack([torch.tensor(b["attention_mask"]) for b in batch])
 
-    # Keep target_text as a list
     target_texts = [b["target_text"] for b in batch]
 
     return {
         "input_ids": input_ids,
         "attention_mask": attention_mask,
-        "target_texts": target_texts
+        "target_text": target_texts,
     }
+
 
 
 def preprocess_dataset(
