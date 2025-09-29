@@ -42,7 +42,7 @@ def evaluate_model(model, val_loader, device, tokenizer, max_gen_length=50, show
     for batch in tqdm(val_loader, desc="Evaluating"):
         input_ids = batch["input_ids"].to(device)
         attention_mask = batch["attention_mask"].to(device)
-        labels = batch["labels"].to(device)
+        target_texts = batch["target_text"]  # Ground truth answers from preprocessing
 
         with torch.no_grad():
             outputs = model.generate(
@@ -62,14 +62,12 @@ def evaluate_model(model, val_loader, device, tokenizer, max_gen_length=50, show
                 generated_ids = generated_ids[:-1]
             pred = tokenizer.decode(generated_ids, skip_special_tokens=True).strip()
 
-            # Decode gold answer from labels
-            label_ids = labels[i]
-            answer_ids = [lid.item() for lid in label_ids if lid.item() != -100]
-            ref = tokenizer.decode(answer_ids, skip_special_tokens=True).strip()
+            # Get reference from target_text
+            ref = target_texts[i].strip()
             
-            # Cut off everything before "Answer: "
-            if "Answer:" in pred:
-                pred = pred.split("Answer:", 1)[1].strip()
+            # # Cut off everything before "Answer: "
+            # if "Answer:" in pred:
+            #     pred = pred.split("Answer:", 1)[1].strip()
 
             preds.append(pred)
             refs.append(ref)
