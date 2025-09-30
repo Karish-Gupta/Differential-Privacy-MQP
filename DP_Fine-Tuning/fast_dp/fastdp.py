@@ -7,6 +7,7 @@ from utils.model_utils import *
 from utils.gpu_usage import *
 from utils.preprocessing import preprocess_dataset
 from huggingface_hub import login
+from accelerate import Accelerator
 import os
 
 # Login to HF CLI
@@ -64,6 +65,8 @@ class FastDPModel:
       self.model = None
       self.optimizer = None
       self.privacy_engine = None
+      self.accelerator = Accelerator(mixed_precision="fp16") # Accelerate support
+
 
 
    def preprocess_dataset(self, train_size, eval_size, seed=101):
@@ -86,7 +89,7 @@ class FastDPModel:
       )
 
    def init_model(self):
-      self.model = AutoModelForCausalLM.from_pretrained(self.model_name, device_map="cuda:0")
+      self.model = AutoModelForCausalLM.from_pretrained(self.model_name)
       self.model = self.model.to(torch.float16)
       self.model.gradient_checkpointing_enable()
 
@@ -106,8 +109,16 @@ class FastDPModel:
       # Optimizer over only trainable (LoRA) params
       trainable_params = (p for p in self.model.parameters() if p.requires_grad)
       self.optimizer = torch.optim.AdamW(trainable_params, lr=self.learning_rate)
+      
+      # Prepare model, optimizer, and loaders with accelerator
+      self.model, self.optimizer, self.train_loader, self.val_loader = self.accelerator.prepare(
+         self.model,
+         self.optimizer, 
+         self.train_loader, 
+         self.val_loader
+      )
 
-      effective_batch_size = self.train_batch_size * self.gradient_accumulation_steps
+      effective_batch_size = self.train_batch_size
       self.privacy_engine = PrivacyEngine(
          self.model,
          batch_size=effective_batch_size,
@@ -129,31 +140,35 @@ class FastDPModel:
       for epoch in range(self.num_epochs):
          running_loss = 0.0
          for step, batch in enumerate(self.train_loader):
-               input_ids = batch["input_ids"].to(self.device)
-               attention_mask = batch["attention_mask"].to(self.device)
-               labels = batch["labels"].to(self.device)
+            outputs = self.model(
+                  input_ids=batch["input_ids"],
+                  attention_mask=batch["attention_mask"],
+                  labels=batch["labels"]
+            )
+            loss = outputs.loss
+            self.accelerator.backward(loss)
 
-               outputs = self.model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
-               loss = outputs.loss
-               loss.backward()
+            self.optimizer.step()
+            self.optimizer.zero_grad()
 
-               self.optimizer.step()
-               self.optimizer.zero_grad()
+            running_loss += loss.item()
+            if step % 500 == 0:
+                  avg_loss = running_loss / (step + 1)
+                  if self.accelerator.is_main_process:  # only log once
+                     print(f"Epoch {epoch+1}, Step {step}, Loss {avg_loss:.4f}")
 
-               running_loss += loss.item()
-               if step % 500 == 0:
-                  print(f"Epoch {epoch+1}, Step {step}, Loss {running_loss / (step+1):.4f}")
-
-      # Detach privacy engine
       try:
          self.privacy_engine.detach()
       except Exception:
          pass
 
-      # Save LoRA adapters only
-      adapter_dir = "./llama3-8b-instruct-squad-dp-lora"
-      self.model.save_pretrained(adapter_dir)
-      self.tokenizer.save_pretrained(adapter_dir)
+      if self.accelerator.is_main_process:  # only main process saves
+         adapter_dir = "./llama3-8b-instruct-squad-dp-lora"
+         
+         # unwrap Accelerate wrapper when saving
+         self.accelerator.unwrap_model(self.model).save_pretrained(adapter_dir)
+         self.tokenizer.save_pretrained(adapter_dir)
+
    
    def evaluate(self):
       if self.val_loader is None:

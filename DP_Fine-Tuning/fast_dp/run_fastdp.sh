@@ -7,7 +7,7 @@
 #SBATCH -e fastdp_run_%j.err         # name of the error file
 #SBATCH -p short                      # partition to submit to
 #SBATCH -t 12:00:00                   # time limit of 12 hours
-#SBATCH --gres=gpu:H100:1             # request 1 H200 GPU
+#SBATCH --gres=gpu:H100:2             # request 1 H200 GPU
 
 cd $SLURM_SUBMIT_DIR/..
 
@@ -29,5 +29,9 @@ pip install scikit-learn
 pip install accelerate
 pip install peft
 
-python -m fast_dp.fastdp
-
+accelerate launch \
+  --multi_gpu \
+  --mixed_precision=fp16 \
+  --num_processes 2 \
+  --num_machines 1 \
+  -m fast_dp.fastdp
