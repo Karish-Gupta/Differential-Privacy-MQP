@@ -44,7 +44,7 @@ def preprocess_dataset(
    # Train tokenizer
    def tokenize_train(example):
       messages = [
-         {"role": "system", "content": {system_prompt}},
+         {"role": "system", "content": system_prompt},
          {"role": "user", "content": f"Context: {example['context']} Question: {example['question']}"}
       ]
 
@@ -89,7 +89,7 @@ def preprocess_dataset(
    # Eval tokenizer
    def tokenize_eval(example):
       messages = [
-         {"role": "system", "content": {system_prompt}},
+         {"role": "system", "content": system_prompt},
          {"role": "user", "content": f"Context: {example['context']} Question: {example['question']}"}
       ]
 

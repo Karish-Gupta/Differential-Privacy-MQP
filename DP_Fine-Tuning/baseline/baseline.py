@@ -21,7 +21,7 @@ class Baseline:
         dataset_name,
         train_batch_size,
         eval_batch_size,
-        gradient_accumulation_steps,
+        # gradient_accumulation_steps,
         num_epochs,
         learning_rate,
         max_input_length,
@@ -37,7 +37,7 @@ class Baseline:
         self.dataset_name = dataset_name
         self.train_batch_size = train_batch_size
         self.eval_batch_size = eval_batch_size
-        self.gradient_accumulation_steps = gradient_accumulation_steps
+        # self.gradient_accumulation_steps = gradient_accumulation_steps
         self.num_epochs = num_epochs
         self.learning_rate = learning_rate
         self.max_input_length = max_input_length
@@ -109,12 +109,11 @@ class Baseline:
                 labels = batch["labels"].to(self.device)
 
                 outputs = self.model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
-                loss = outputs.loss / self.gradient_accumulation_steps
+                loss = outputs.loss
                 loss.backward()
 
-                if (step + 1) % self.gradient_accumulation_steps == 0:
-                    self.optimizer.step()
-                    self.optimizer.zero_grad()
+                self.optimizer.step()
+                self.optimizer.zero_grad()
 
                 running_loss += loss.item()
                 if step % 500 == 0:
@@ -148,7 +147,7 @@ if __name__ == "__main__":
     dataset_name = "squad"
     train_batch_size = 4
     eval_batch_size = 4
-    gradient_accumulation_steps = 8
+    # gradient_accumulation_steps = 8
     num_epochs = 5
     learning_rate = 2e-4
     max_input_length = 512
@@ -162,7 +161,7 @@ if __name__ == "__main__":
         dataset_name=dataset_name,
         train_batch_size=train_batch_size,
         eval_batch_size=eval_batch_size,
-        gradient_accumulation_steps=gradient_accumulation_steps,
+        # gradient_accumulation_steps=gradient_accumulation_steps,
         num_epochs=num_epochs,
         learning_rate=learning_rate,
         max_input_length=max_input_length,
