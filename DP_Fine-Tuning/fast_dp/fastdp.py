@@ -107,10 +107,10 @@ class FastDPModel:
       trainable_params = (p for p in self.model.parameters() if p.requires_grad)
       self.optimizer = torch.optim.AdamW(trainable_params, lr=self.learning_rate)
 
-      effective_batch_size = self.train_batch_size * self.gradient_accumulation_steps
+      # effective_batch_size = self.train_batch_size * self.gradient_accumulation_steps
       self.privacy_engine = PrivacyEngine(
          self.model,
-         batch_size=effective_batch_size,
+         batch_size=self.train_batch_size,
          sample_size=self.train_size,
          epochs=self.num_epochs,
          target_epsilon=self.target_epsilon,
