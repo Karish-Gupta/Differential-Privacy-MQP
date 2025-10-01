@@ -1,3 +1,4 @@
+import re
 import numpy as np
 import torch
 from tqdm import tqdm
@@ -14,7 +15,7 @@ def calculate_contains_acc(preds, refs):
     """
     Returns contains accuracy
     """
-    return np.mean([1 if r.lower() in p.lower() or p.lower() in r.lower() else 0 for p, r in zip(preds, refs)])
+    return np.mean([1 if r.lower() in p.lower() else 0 for p, r in zip(preds, refs)])
 
 def calculate_f1(preds, refs):
     """
@@ -42,7 +43,7 @@ def evaluate_model(model, val_loader, device, tokenizer, max_gen_length=50, show
     for batch in tqdm(val_loader, desc="Evaluating"):
         input_ids = batch["input_ids"].to(device)
         attention_mask = batch["attention_mask"].to(device)
-        labels = batch["labels"].to(device)
+        target_texts = batch["target_text"]  # Ground truth answers from preprocessing
 
         with torch.no_grad():
             outputs = model.generate(
@@ -62,14 +63,11 @@ def evaluate_model(model, val_loader, device, tokenizer, max_gen_length=50, show
                 generated_ids = generated_ids[:-1]
             pred = tokenizer.decode(generated_ids, skip_special_tokens=True).strip()
 
-            # Decode gold answer from labels
-            label_ids = labels[i]
-            answer_ids = [lid.item() for lid in label_ids if lid.item() != -100]
-            ref = tokenizer.decode(answer_ids, skip_special_tokens=True).strip()
+            # Get reference from target_text
+            ref = target_texts[i].strip()
             
-            # Cut off everything before "Answer: "
-            if "Answer:" in pred:
-                pred = pred.split("Answer:", 1)[1].strip()
+            # Remove leading "assistant" (case-insensitive, with optional colon or newline)
+            pred = re.sub(r"^(assistant[:\s]*)", "", pred, flags=re.IGNORECASE)
 
             preds.append(pred)
             refs.append(ref)

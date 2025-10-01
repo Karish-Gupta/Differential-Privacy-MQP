@@ -15,12 +15,12 @@ from flashdp.api.wrap_model import wrap_with_flashdp_layers
 from peft import LoraConfig, get_peft_model, TaskType  # Added for LoRA
 from utils.model_utils import *
 from utils.gpu_usage import *
+from utils.preprocessing import preprocess_dataset
 from huggingface_hub import login
 
 # Login to HF CLI
 if "HF_TOKEN" in os.environ:
     login(token=os.environ["HF_TOKEN"])
-
 logging.set_verbosity_error()
 
 class FlashDPModel:
@@ -41,7 +41,7 @@ class FlashDPModel:
         target_delta=1e-5,
         train_size=None,
         lora_r=16,
-        lora_alpha=16,  # Changed to match fastdp.py
+        lora_alpha=16,
         lora_dropout=0.05,
         lora_target_modules=None,
         lora_bias="none",
@@ -73,106 +73,22 @@ class FlashDPModel:
         self.lora_bias = lora_bias
 
     def preprocess_dataset(self, train_size, eval_size, seed=101):
-        dataset = load_dataset(self.dataset_name)
-        self.train_size = train_size  # Store for DP calculations
-
-        dataset["train"] = dataset["train"].shuffle(seed=seed).select(range(train_size))
-        dataset["validation"] = dataset["validation"].shuffle(seed=seed).select(range(eval_size))
-
-        # Initialize tokenizer first
+        # Initialize tokenizer
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
         self.tokenizer.pad_token = self.tokenizer.eos_token
         self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
 
-        def preprocess_and_tokenize_train(example):
-            messages = [
-                {"role": "system", "content": "You are a knowledgeable, efficient, and direct AI assistant. Provide concise answers, in format Answer: {answer}"},
-                {"role": "user", "content": f"Context: {example['context']} Question: {example['question']}"}
-            ]
-            input_text = self.tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
-            target_text = example["answers"]["text"][0] if len(example["answers"]["text"]) > 0 else ""
-            full_text = input_text + target_text
-            
-            tokenized = self.tokenizer(
-                full_text,
-                max_length=self.max_input_length + self.max_target_length,
-                truncation=True,
-                padding="max_length",
-            )
-
-            input_tokens = self.tokenizer(
-                input_text,
-                max_length=self.max_input_length,
-                truncation=True,
-                padding=False,
-                add_special_tokens=False
-            )
-            input_length = len(input_tokens["input_ids"])
-
-            labels = tokenized["input_ids"].copy()
-            labels[:input_length] = [-100] * input_length  # mask input
-            labels = [(l if l != self.tokenizer.pad_token_id else -100) for l in labels]
-
-            tokenized["labels"] = labels
-            return tokenized
-        
-        def preprocess_and_tokenize_eval(example):
-            messages = [
-                {"role": "system", "content": "You are a knowledgeable, efficient, and direct AI assistant. Provide concise answers, in format Answer: {answer}"},
-                {"role": "user", "content": f"Context: {example['context']} Question: {example['question']}"}
-            ]
-            input_text = self.tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
-            target_text = example["answers"]["text"][0] if len(example["answers"]["text"]) > 0 else ""
-
-            # Tokenize prompt only for inputs
-            tokenized_inputs = self.tokenizer(
-                input_text,
-                max_length=self.max_input_length,
-                truncation=True,
-                padding="max_length"
-            )
-
-            # Tokenize full_text (with answer) just to build labels
-            tokenized_full = self.tokenizer(
-                input_text + target_text,
-                max_length=self.max_input_length + self.max_target_length,
-                truncation=True,
-                padding="max_length"
-            )
-
-            # Mask out the input part, keep only the answer portion for labels
-            labels = tokenized_full["input_ids"].copy()
-            input_length = len(self.tokenizer(input_text, add_special_tokens=False)["input_ids"])
-            labels[:input_length] = [-100] * input_length
-            labels = [(l if l != self.tokenizer.pad_token_id else -100) for l in labels]
-
-            tokenized_inputs["labels"] = labels
-            
-            return tokenized_inputs
-
-        train_dataset = dataset["train"].map(
-            preprocess_and_tokenize_train,
-            batched=False,
-            remove_columns=dataset["train"].column_names,
-        )
-
-        eval_dataset = dataset["validation"].map(
-            preprocess_and_tokenize_eval, 
-            batched=False,
-            remove_columns=dataset["validation"].column_names
-        )
-
-        self.train_loader = DataLoader(
-            train_dataset,
-            batch_size=self.train_batch_size,
-            shuffle=True,
-            collate_fn=default_data_collator,
-        )
-        
-        self.val_loader = DataLoader(
-            eval_dataset,
-            batch_size=self.eval_batch_size,
-            collate_fn=default_data_collator,
+        # Call the external preprocessing function
+        self.train_loader, self.val_loader = preprocess_dataset(
+            tokenizer=self.tokenizer,
+            dataset_name=self.dataset_name,
+            train_size=train_size,
+            eval_size=eval_size,
+            max_input_length=self.max_input_length,
+            max_target_length=self.max_target_length,
+            train_batch_size=self.train_batch_size,
+            eval_batch_size=self.eval_batch_size,
+            seed=seed
         )
 
     def estimate_noise_multiplier(self, target_epsilon, target_delta, epochs, batch_size, dataset_size):
@@ -257,13 +173,6 @@ class FlashDPModel:
                 running_loss += loss.item()
                 if step % 500 == 0:
                     print(f"Epoch {epoch+1}, Step {step}, Loss {running_loss / (step+1):.4f}")
-        
-        # Detach privacy engine (for compatibility with fastdp.py)
-        try:
-            # This will have no effect in FlashDP but matches the structure in fastdp.py
-            pass
-        except Exception:
-            pass
                     
         # Save LoRA adapters only - use same path as fastdp.py
         adapter_dir = "./llama3-8b-instruct-squad-dp-lora"
@@ -281,24 +190,24 @@ class FlashDPModel:
             self.val_loader,
             model_device,
             self.tokenizer,
-            max_gen_length=60, # Make 60????
-            show_samples=10
+            max_gen_length=64,
+            show_samples=10,
         )
 
 if __name__ == "__main__":
     # Model Configs
     target_epsilon = 8.0  # Set desired epsilon 
     target_delta = 1e-5   # Set desired delta 
-    model_name = "meta-llama/Llama-3.1-8B-Instruct"  # Original model name
+    model_name = "meta-llama/Llama-3.1-8B-Instruct"  
     dataset_name = "squad"
-    train_batch_size = 1
-    eval_batch_size = 1
+    train_batch_size = 4
+    eval_batch_size = 4
     gradient_accumulation_steps = 8
     num_epochs = 5
     learning_rate = 2e-4
     max_input_length = 512
     max_target_length = 512
-    train_size = 5000  # Match baseline and fastdp
+    train_size = 5000 
     eval_size = 500
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     dp_c = 1.0
@@ -330,7 +239,7 @@ if __name__ == "__main__":
         dp_noise=dp_noise,
         target_epsilon=target_epsilon,
         target_delta=target_delta,
-        train_size=train_size,  # Match fastdp.py parameter order
+        train_size=train_size, 
         lora_r=lora_r,
         lora_alpha=lora_alpha,
         lora_dropout=lora_dropout,
@@ -354,6 +263,7 @@ if __name__ == "__main__":
     print(f"Max target length: {max_target_length}")
     print(f"Training size: {train_size}")
     print(f"Eval size: {eval_size}")
+    print(f"Epsilon: {target_epsilon}")
 
     flashdp.evaluate()
     

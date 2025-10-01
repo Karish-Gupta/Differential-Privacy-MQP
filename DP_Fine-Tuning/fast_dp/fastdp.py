@@ -1,13 +1,11 @@
 import numpy as np
 import torch
-import tqdm
 from peft import LoraConfig, get_peft_model, TaskType
-from torch.utils.data import DataLoader
-from transformers import AutoModelForCausalLM, AutoTokenizer, default_data_collator
-from datasets import load_dataset
+from transformers import AutoModelForCausalLM, AutoTokenizer
 from fastDP import PrivacyEngine
 from utils.model_utils import *
 from utils.gpu_usage import *
+from utils.preprocessing import preprocess_dataset
 from huggingface_hub import login
 import os
 
@@ -23,7 +21,7 @@ class FastDPModel:
       dataset_name,
       train_batch_size,
       eval_batch_size,
-      gradient_accumulation_steps,
+      # gradient_accumulation_steps,
       num_epochs,
       learning_rate,
       max_input_length,
@@ -42,7 +40,7 @@ class FastDPModel:
       self.dataset_name = dataset_name
       self.train_batch_size = train_batch_size
       self.eval_batch_size = eval_batch_size
-      self.gradient_accumulation_steps = gradient_accumulation_steps
+      # self.gradient_accumulation_steps = gradient_accumulation_steps
       self.num_epochs = num_epochs
       self.learning_rate = learning_rate
       self.max_input_length = max_input_length
@@ -69,99 +67,22 @@ class FastDPModel:
 
 
    def preprocess_dataset(self, train_size, eval_size, seed=101):
-      dataset = load_dataset(self.dataset_name)
-      self.train_size = train_size
-
-      dataset["train"] = dataset["train"].shuffle(seed=seed).select(range(train_size))
-      dataset["validation"] = dataset["validation"].shuffle(seed=seed).select(range(eval_size))
-
-      # Initialize tokenizer first
+      # Initialize tokenizer
       self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
       self.tokenizer.pad_token = self.tokenizer.eos_token
       self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
 
-      def preprocess_and_tokenize_train(example):
-         input_text = "Context: " + example["context"] + " Question: " + example["question"] + " Answer: "
-         target_text = example["answers"]["text"][0] if len(example["answers"]["text"]) > 0 else ""
-         full_text = input_text + target_text
-         
-         tokenized = self.tokenizer(
-               full_text,
-               max_length=self.max_input_length + self.max_target_length,
-               truncation=True,
-               padding="max_length",
-         )
-
-         input_tokens = self.tokenizer(
-               input_text,
-               max_length=self.max_input_length,
-               truncation=True,
-               padding=False,
-               add_special_tokens=False
-         )
-         input_length = len(input_tokens["input_ids"])
-
-         labels = tokenized["input_ids"].copy()
-         labels[:input_length] = [-100] * input_length  # mask input
-         labels = [(l if l != self.tokenizer.pad_token_id else -100) for l in labels]
-
-         tokenized["labels"] = labels
-         return tokenized
-      
-      def preprocess_and_tokenize_eval(example):
-         # Prompt only (no gold answer appended to input_ids)
-         input_text = "Context: " + example["context"] + " Question: " + example["question"] + " Answer: "
-         target_text = example["answers"]["text"][0] if len(example["answers"]["text"]) > 0 else ""
-
-         # Tokenize prompt only for inputs
-         tokenized_inputs = self.tokenizer(
-               input_text,
-               max_length=self.max_input_length,
-               truncation=True,
-               padding="max_length"
-         )
-
-         # Tokenize full_text (with answer) just to build labels
-         tokenized_full = self.tokenizer(
-               input_text + target_text,
-               max_length=self.max_input_length + self.max_target_length,
-               truncation=True,
-               padding="max_length"
-         )
-
-         # Mask out the input part, keep only the answer portion for labels
-         labels = tokenized_full["input_ids"].copy()
-         input_length = len(self.tokenizer(input_text, add_special_tokens=False)["input_ids"])
-         labels[:input_length] = [-100] * input_length
-         labels = [(l if l != self.tokenizer.pad_token_id else -100) for l in labels]
-
-         tokenized_inputs["labels"] = labels
-         
-         return tokenized_inputs
-
-      train_dataset = dataset["train"].map(
-         preprocess_and_tokenize_train,
-         batched=False,
-         remove_columns=dataset["train"].column_names,
-      )
-
-      eval_dataset = dataset["validation"].map(
-         preprocess_and_tokenize_eval, 
-         batched=False,
-         remove_columns=dataset["validation"].column_names
-      )
-
-      self.train_loader = DataLoader(
-         train_dataset,
-         batch_size=self.train_batch_size,
-         shuffle=True,
-         collate_fn=default_data_collator,
-      )
-      
-      self.val_loader = DataLoader(
-         eval_dataset,
-         batch_size=self.eval_batch_size,
-         collate_fn=default_data_collator,
+      # Call the external preprocessing function
+      self.train_loader, self.val_loader = preprocess_dataset(
+         tokenizer=self.tokenizer,
+         dataset_name=self.dataset_name,
+         train_size=train_size,
+         eval_size=eval_size,
+         max_input_length=self.max_input_length,
+         max_target_length=self.max_target_length,
+         train_batch_size=self.train_batch_size,
+         eval_batch_size=self.eval_batch_size,
+         seed=seed
       )
 
    def init_model(self):
@@ -186,10 +107,10 @@ class FastDPModel:
       trainable_params = (p for p in self.model.parameters() if p.requires_grad)
       self.optimizer = torch.optim.AdamW(trainable_params, lr=self.learning_rate)
 
-      effective_batch_size = self.train_batch_size * self.gradient_accumulation_steps
+      # effective_batch_size = self.train_batch_size * self.gradient_accumulation_steps
       self.privacy_engine = PrivacyEngine(
          self.model,
-         batch_size=effective_batch_size,
+         batch_size=self.train_batch_size,
          sample_size=self.train_size,
          epochs=self.num_epochs,
          target_epsilon=self.target_epsilon,
@@ -213,12 +134,11 @@ class FastDPModel:
                labels = batch["labels"].to(self.device)
 
                outputs = self.model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
-               loss = outputs.loss / self.gradient_accumulation_steps
+               loss = outputs.loss
                loss.backward()
 
-               if (step + 1) % self.gradient_accumulation_steps == 0:
-                  self.optimizer.step()
-                  self.optimizer.zero_grad()
+               self.optimizer.step()
+               self.optimizer.zero_grad()
 
                running_loss += loss.item()
                if step % 500 == 0:
@@ -246,7 +166,7 @@ class FastDPModel:
          self.val_loader,
          model_device,
          self.tokenizer,
-         max_gen_length=30,
+         max_gen_length=64,
          show_samples=10
       )
 
@@ -256,15 +176,15 @@ if __name__ == "__main__":
    # Model Configs
    model_name = "meta-llama/Meta-Llama-3-8B-Instruct"
    dataset_name = "squad"
-   train_batch_size = 1
-   eval_batch_size = 1
-   gradient_accumulation_steps = 8
+   train_batch_size = 4
+   eval_batch_size = 4
+   # gradient_accumulation_steps = 8
    num_epochs = 5
    learning_rate = 2e-4
    max_input_length = 512
    max_target_length = 512
    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-   target_epsilon = 8.0
+   target_epsilon = 2.0
    train_size = 5000
    eval_size = 500
 
@@ -274,7 +194,7 @@ if __name__ == "__main__":
          dataset_name=dataset_name,
          train_batch_size=train_batch_size,
          eval_batch_size=eval_batch_size,
-         gradient_accumulation_steps=gradient_accumulation_steps,
+         # gradient_accumulation_steps=gradient_accumulation_steps,
          num_epochs=num_epochs,
          learning_rate=learning_rate,
          max_input_length=max_input_length,
@@ -300,6 +220,8 @@ if __name__ == "__main__":
    print(f"Max target length: {max_target_length}")
    print(f"Traing size: {train_size}")
    print(f"Eval size: {eval_size}")
+   print(f"Epsilon: {target_epsilon}")
+   
    fastdp.evaluate()
 
    # Ouput GPU logging
