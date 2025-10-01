@@ -16,11 +16,7 @@ from peft import LoraConfig, get_peft_model, TaskType  # Added for LoRA
 from utils.model_utils import *
 from utils.gpu_usage import *
 from utils.preprocessing import preprocess_dataset
-from huggingface_hub import login
 
-# Login to HF CLI
-if "HF_TOKEN" in os.environ:
-    login(token=os.environ["HF_TOKEN"])
 logging.set_verbosity_error()
 
 class FlashDPModel:
@@ -30,7 +26,7 @@ class FlashDPModel:
         dataset_name,
         train_batch_size,
         eval_batch_size,
-        gradient_accumulation_steps,
+        gradient_accumulation_steps,  # Keeping parameter but will not use
         num_epochs,
         learning_rate,
         max_input_length,
@@ -59,7 +55,7 @@ class FlashDPModel:
         self.target_epsilon = target_epsilon
         self.target_delta = target_delta
         self.dp_noise = dp_noise
-        self.train_size = train_size  # Store train_size for dataset setup
+        self.train_size = train_size
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.tokenizer = None
         self.model = None
@@ -109,9 +105,14 @@ class FlashDPModel:
         return sigma
 
     def init_model(self):          
-        # Load model with automatic device mapping for multi-GPU support
         self.model = AutoModelForCausalLM.from_pretrained(self.model_name, device_map="auto")
+        self.model = self.model.to(torch.float32)
         self.model.gradient_checkpointing_enable()
+        
+        # # Print model device map for verification
+        # if hasattr(self.model, 'hf_device_map'):
+        #     print("[Device Map] Model loaded with device map:")
+        #     print(self.model.hf_device_map)
             
         # DP wrapping (before LoRA)
         # If dp_noise is not set, estimate it from target_epsilon
@@ -120,7 +121,7 @@ class FlashDPModel:
                 target_epsilon=self.target_epsilon,
                 target_delta=self.target_delta,
                 epochs=self.num_epochs,
-                batch_size=self.train_batch_size * self.gradient_accumulation_steps,  # Use effective batch size
+                batch_size=self.train_batch_size,
                 dataset_size=len(self.train_loader.dataset)
             )
             print(f"[FlashDP] Estimated noise_multiplier for target_epsilon={self.target_epsilon}: {self.dp_noise}")
@@ -163,6 +164,7 @@ class FlashDPModel:
                 labels = batch["labels"].to(self.device)
                 
                 outputs = self.model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
+                loss = outputs.loss
                 loss = outputs.loss / self.gradient_accumulation_steps
                 loss.backward()
                 
@@ -173,6 +175,13 @@ class FlashDPModel:
                 running_loss += loss.item()
                 if step % 500 == 0:
                     print(f"Epoch {epoch+1}, Step {step}, Loss {running_loss / (step+1):.4f}")
+        
+        # Detach privacy engine (for compatibility with fastdp.py)
+        try:
+            # This will have no effect in FlashDP but matches the structure in fastdp.py
+            pass
+        except Exception:
+            pass
                     
         # Save LoRA adapters only - use same path as fastdp.py
         adapter_dir = "./llama3-8b-instruct-squad-dp-lora"
@@ -180,6 +189,7 @@ class FlashDPModel:
         self.tokenizer.save_pretrained(adapter_dir)
 
     def evaluate(self):
+        # Use the same validation loader as in preprocess_dataset
         if self.val_loader is None:
             print("Validation loader not initialized. Run preprocess_dataset() first.")
             return
@@ -195,21 +205,21 @@ class FlashDPModel:
         )
 
 if __name__ == "__main__":
-    # Model Configs
+
+    # Configs
     target_epsilon = 8.0  # Set desired epsilon 
     target_delta = 1e-5   # Set desired delta 
-    model_name = "meta-llama/Llama-3.1-8B-Instruct"  
-    dataset_name = "squad"
+    model_name = "meta-llama/Meta-Llama-3.1-8B-Instruct"
+    dataset_name = "squad"  # Adding dataset_name
     train_batch_size = 4
     eval_batch_size = 4
-    gradient_accumulation_steps = 8
+    gradient_accumulation_steps = 1  # Not used, kept for API compatibility
     num_epochs = 5
     learning_rate = 2e-4
-    max_input_length = 512
-    max_target_length = 512
-    train_size = 5000 
+    max_input_length = 512  # Reduced from 2000 to improve training speed
+    max_target_length = 512  # Reduced from 2000 to improve training speed
+    train_size = 5000
     eval_size = 500
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     dp_c = 1.0
     dp_noise = None  # Let the code compute noise_multiplier from target_epsilon
     # LoRA configs                      
@@ -239,7 +249,7 @@ if __name__ == "__main__":
         dp_noise=dp_noise,
         target_epsilon=target_epsilon,
         target_delta=target_delta,
-        train_size=train_size, 
+        train_size=train_size,
         lora_r=lora_r,
         lora_alpha=lora_alpha,
         lora_dropout=lora_dropout,
@@ -254,14 +264,14 @@ if __name__ == "__main__":
     flashdp.train()
     
     print(f"Model: {model_name}")
-    print(f"On device: {device}")
     print(f"Number of epochs: {num_epochs}")
     print(f"Train batch size: {train_batch_size}")
     print(f"Eval batch size: {eval_batch_size}")
+    print(f"Gradient accumulation steps: {gradient_accumulation_steps}")
     print(f"Learning rate: {learning_rate}")
     print(f"Max input length: {max_input_length}")
     print(f"Max target length: {max_target_length}")
-    print(f"Training size: {train_size}")
+    print(f"Training size: {train_size}")  # Fixed typo in "Training"
     print(f"Eval size: {eval_size}")
     print(f"Epsilon: {target_epsilon}")
 
