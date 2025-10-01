@@ -1,4 +1,177 @@
-import fastdp
+import numpy as np
+import torch
+from peft import LoraConfig, get_peft_model, TaskType
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from fastDP import PrivacyEngine
+from utils.model_utils import *
+from utils.gpu_usage import *
+from utils.preprocessing import preprocess_dataset
+from huggingface_hub import login
+import os
+
+# Login to HF CLI
+if "HF_TOKEN" in os.environ:
+   login(token=os.environ["HF_TOKEN"])
+# transformers.utils.logging.set_verbosity_debug()
+
+class FastDPModel:
+   def __init__(
+      self,
+      model_name,
+      dataset_name,
+      train_batch_size,
+      eval_batch_size,
+      gradient_accumulation_steps,
+      num_epochs,
+      learning_rate,
+      max_input_length,
+      max_target_length,
+      target_epsilon,
+      train_size,
+
+      lora_r=16,
+      lora_alpha=16,
+      lora_dropout=0.05,
+      lora_target_modules=None,   # if None, good defaults for LLaMA
+      lora_bias="none",           # "none" | "lora_only" | "all"
+   ):
+      # Configs
+      self.model_name = model_name
+      self.dataset_name = dataset_name
+      self.train_batch_size = train_batch_size
+      self.eval_batch_size = eval_batch_size
+      self.gradient_accumulation_steps = gradient_accumulation_steps
+      self.num_epochs = num_epochs
+      self.learning_rate = learning_rate
+      self.max_input_length = max_input_length
+      self.max_target_length = max_target_length
+      self.target_epsilon = target_epsilon
+      self.train_size = train_size
+      self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+      # LoRA configs
+      self.lora_r = lora_r
+      self.lora_alpha = lora_alpha
+      self.lora_dropout = lora_dropout
+      self.lora_target_modules = lora_target_modules
+      self.lora_bias = lora_bias
+
+      # Setup
+      self.dataset = None
+      self.tokenizer = None
+      self.train_loader = None
+      self.val_loader = None
+      self.model = None
+      self.optimizer = None
+      self.privacy_engine = None
+
+
+   def preprocess_dataset(self, train_size, eval_size, seed=101):
+      # Initialize tokenizer
+      self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
+      self.tokenizer.pad_token = self.tokenizer.eos_token
+      self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
+
+      # Call the external preprocessing function
+      self.train_loader, self.val_loader = preprocess_dataset(
+         tokenizer=self.tokenizer,
+         dataset_name=self.dataset_name,
+         train_size=train_size,
+         eval_size=eval_size,
+         max_input_length=self.max_input_length,
+         max_target_length=self.max_target_length,
+         train_batch_size=self.train_batch_size,
+         eval_batch_size=self.eval_batch_size,
+         seed=seed
+      )
+
+   def init_model(self):
+      self.model = AutoModelForCausalLM.from_pretrained(self.model_name, device_map="cuda:0")
+      self.model = self.model.to(torch.float16)
+      self.model.gradient_checkpointing_enable()
+
+      target_modules = self.lora_target_modules or ["q_proj", "k_proj", "v_proj", "o_proj"]
+      peft_config = LoraConfig(
+         task_type=TaskType.CAUSAL_LM,
+         r=self.lora_r,
+         lora_alpha=self.lora_alpha,
+         lora_dropout=self.lora_dropout,
+         bias=self.lora_bias,
+         target_modules=target_modules,
+      )
+
+      self.model = get_peft_model(self.model, peft_config)
+      self.model.print_trainable_parameters()
+
+      # Optimizer over only trainable (LoRA) params
+      trainable_params = (p for p in self.model.parameters() if p.requires_grad)
+      self.optimizer = torch.optim.AdamW(trainable_params, lr=self.learning_rate)
+
+      # effective_batch_size = self.train_batch_size * self.gradient_accumulation_steps
+      self.privacy_engine = PrivacyEngine(
+         self.model,
+         batch_size=self.train_batch_size,
+         sample_size=self.train_size,
+         epochs=self.num_epochs,
+         target_epsilon=self.target_epsilon,
+         clipping_fn="automatic",
+         clipping_mode="MixOpt",
+         clipping_style="all-layer"
+      )
+
+      print("Attaching PrivacyEngine...")
+      self.privacy_engine.attach(self.optimizer)
+      print("PrivacyEngine attached.")
+
+
+   def train(self):
+      self.model.train()
+      for epoch in range(self.num_epochs):
+         running_loss = 0.0
+         for step, batch in enumerate(self.train_loader):
+               input_ids = batch["input_ids"].to(self.device)
+               attention_mask = batch["attention_mask"].to(self.device)
+               labels = batch["labels"].to(self.device)
+
+               outputs = self.model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
+               loss = outputs.loss / self.gradient_accumulation_steps
+               loss.backward()
+               
+               if (step + 1) % self.gradient_accumulation_steps == 0:
+                  self.optimizer.step()
+                  self.optimizer.zero_grad()
+
+               running_loss += loss.item()
+               if step % 500 == 0:
+                  print(f"Epoch {epoch+1}, Step {step}, Loss {running_loss / (step+1):.4f}")
+
+      # Detach privacy engine
+      try:
+         self.privacy_engine.detach()
+      except Exception:
+         pass
+
+      # Save LoRA adapters only
+      adapter_dir = "./llama3-8b-instruct-squad-dp-lora"
+      self.model.save_pretrained(adapter_dir)
+      self.tokenizer.save_pretrained(adapter_dir)
+   
+   def evaluate(self):
+      if self.val_loader is None:
+         print("Validation loader not initialized. Run preprocess_dataset() first.")
+         return
+      model_device = next(self.model.parameters()).device
+      print("Evaluating...")
+      evaluate_model(
+         self.model,
+         self.val_loader,
+         model_device,
+         self.tokenizer,
+         max_gen_length=64,
+         show_samples=10
+      )
+
+
 
 if __name__ == "__main__":
    # Model Configs
@@ -6,7 +179,7 @@ if __name__ == "__main__":
    dataset_name = "squad"
    train_batch_size = 4
    eval_batch_size = 4
-   # gradient_accumulation_steps = 8
+   gradient_accumulation_steps = 8
    num_epochs = 5
    learning_rate = 2e-4
    max_input_length = 512
@@ -22,7 +195,7 @@ if __name__ == "__main__":
          dataset_name=dataset_name,
          train_batch_size=train_batch_size,
          eval_batch_size=eval_batch_size,
-         # gradient_accumulation_steps=gradient_accumulation_steps,
+         gradient_accumulation_steps=gradient_accumulation_steps,
          num_epochs=num_epochs,
          learning_rate=learning_rate,
          max_input_length=max_input_length,
