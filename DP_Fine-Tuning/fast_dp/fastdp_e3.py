@@ -1,4 +1,4 @@
-from fastdp import *
+import fastdp
 
 if __name__ == "__main__":
    # Model Configs
