@@ -215,12 +215,12 @@ if __name__ == "__main__":
    eval_batch_size = 4
    gradient_accumulation_steps = 32
    num_epochs = 15
-   learning_rate = 1e-3
+   learning_rate = 5e-4
    max_input_length = 512
    max_target_length = 512
    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
    target_epsilon = 2.0
-   train_size = 20000
+   train_size = 5000
    eval_size = 500
 
 
