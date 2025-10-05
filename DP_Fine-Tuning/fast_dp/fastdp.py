@@ -29,8 +29,8 @@ class FastDPModel:
       target_epsilon,
       train_size,
 
-      lora_r=16,
-      lora_alpha=16,
+      lora_r=32,
+      lora_alpha=64,
       lora_dropout=0.05,
       lora_target_modules=None,   # if None, good defaults for LLaMA
       lora_bias="none",           # "none" | "lora_only" | "all"
@@ -214,13 +214,13 @@ if __name__ == "__main__":
    train_batch_size = 4
    eval_batch_size = 4
    gradient_accumulation_steps = 32
-   num_epochs = 5
-   learning_rate = 5e-4
+   num_epochs = 15
+   learning_rate = 1e-3
    max_input_length = 512
    max_target_length = 512
    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
    target_epsilon = 2.0
-   train_size = 5000
+   train_size = 20000
    eval_size = 500
 
 
