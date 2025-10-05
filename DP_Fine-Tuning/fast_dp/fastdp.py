@@ -21,7 +21,7 @@ class FastDPModel:
       dataset_name,
       train_batch_size,
       eval_batch_size,
-      # gradient_accumulation_steps,
+      gradient_accumulation_steps,
       num_epochs,
       learning_rate,
       max_input_length,
@@ -40,7 +40,7 @@ class FastDPModel:
       self.dataset_name = dataset_name
       self.train_batch_size = train_batch_size
       self.eval_batch_size = eval_batch_size
-      # self.gradient_accumulation_steps = gradient_accumulation_steps
+      self.gradient_accumulation_steps = gradient_accumulation_steps
       self.num_epochs = num_epochs
       self.learning_rate = learning_rate
       self.max_input_length = max_input_length
@@ -107,42 +107,77 @@ class FastDPModel:
       trainable_params = (p for p in self.model.parameters() if p.requires_grad)
       self.optimizer = torch.optim.AdamW(trainable_params, lr=self.learning_rate)
 
-      # effective_batch_size = self.train_batch_size * self.gradient_accumulation_steps
+      effective_batch_size = self.train_batch_size * self.gradient_accumulation_steps
       self.privacy_engine = PrivacyEngine(
          self.model,
-         batch_size=self.train_batch_size,
+         batch_size=effective_batch_size,
          sample_size=self.train_size,
          epochs=self.num_epochs,
          target_epsilon=self.target_epsilon,
          clipping_fn="automatic",
          clipping_mode="MixOpt",
-         clipping_style="all-layer"
+         clipping_style="layer-wise",
+         loss_reduction="mean",
+         record_snr=True,
+         accounting_mode="rdp"
       )
 
       print("Attaching PrivacyEngine...")
       self.privacy_engine.attach(self.optimizer)
       print("PrivacyEngine attached.")
 
+      print(f"\nPrivacy Configuration:")
+      print(f"  Target ε: {self.target_epsilon}")
+      print(f"  Target δ: {self.train_size ** -1.1:.2e}")
+      print(f"  Effective batch size: {effective_batch_size}")
+      print(f"  Training samples: {self.train_size}")
+      print(f"  Epochs: {self.num_epochs}")
+      print(f"  Steps per epoch: {self.train_size // effective_batch_size}")
+
 
    def train(self):
       self.model.train()
+      global_step = 0
+      
       for epoch in range(self.num_epochs):
          running_loss = 0.0
+         epoch_steps = 0
+         
          for step, batch in enumerate(self.train_loader):
-               input_ids = batch["input_ids"].to(self.device)
-               attention_mask = batch["attention_mask"].to(self.device)
-               labels = batch["labels"].to(self.device)
+            input_ids = batch["input_ids"].to(self.device)
+            attention_mask = batch["attention_mask"].to(self.device)
+            labels = batch["labels"].to(self.device)
 
-               outputs = self.model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
-               loss = outputs.loss
-               loss.backward()
+            outputs = self.model(
+               input_ids=input_ids, 
+               attention_mask=attention_mask, 
+               labels=labels
+            )
+            loss = outputs.loss            
+            loss = loss / self.gradient_accumulation_steps
+            loss.backward()
 
+            if (step + 1) % self.gradient_accumulation_steps == 0:
                self.optimizer.step()
                self.optimizer.zero_grad()
+               global_step += 1
+               epoch_steps += 1
 
-               running_loss += loss.item()
-               if step % 500 == 0:
-                  print(f"Epoch {epoch+1}, Step {step}, Loss {running_loss / (step+1):.4f}")
+            running_loss += loss.item() * self.gradient_accumulation_steps
+            
+            # More frequent logging
+            if (step + 1) % 500 == 0:
+               avg_loss = running_loss / (step + 1)
+               print(f"Epoch {epoch+1}/{self.num_epochs}, Step {step+1}, "
+                     f"Loss: {avg_loss:.4f}, Global Step: {global_step}")
+         
+         # Epoch summary
+         epoch_loss = running_loss / len(self.train_loader)
+         print(f"\n{'='*60}")
+         print(f"Epoch {epoch+1}/{self.num_epochs} Complete")
+         print(f"  Average Loss: {epoch_loss:.4f}")
+         print(f"  Steps: {epoch_steps}")
+         print(f"{'='*60}\n")
 
       # Detach privacy engine
       try:
@@ -178,9 +213,9 @@ if __name__ == "__main__":
    dataset_name = "squad"
    train_batch_size = 4
    eval_batch_size = 4
-   # gradient_accumulation_steps = 8
+   gradient_accumulation_steps = 32
    num_epochs = 5
-   learning_rate = 2e-4
+   learning_rate = 5e-4
    max_input_length = 512
    max_target_length = 512
    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -194,7 +229,7 @@ if __name__ == "__main__":
          dataset_name=dataset_name,
          train_batch_size=train_batch_size,
          eval_batch_size=eval_batch_size,
-         # gradient_accumulation_steps=gradient_accumulation_steps,
+         gradient_accumulation_steps=gradient_accumulation_steps,
          num_epochs=num_epochs,
          learning_rate=learning_rate,
          max_input_length=max_input_length,
