@@ -29,7 +29,7 @@ class FastDPModel:
       target_epsilon,
       train_size,
 
-      lora_r=32,
+      lora_r=64,
       lora_alpha=64,
       lora_dropout=0.05,
       lora_target_modules=None,   # if None, good defaults for LLaMA
@@ -90,7 +90,7 @@ class FastDPModel:
       self.model = self.model.to(torch.float16)
       self.model.gradient_checkpointing_enable()
 
-      target_modules = self.lora_target_modules or ["q_proj", "k_proj", "v_proj", "o_proj"]
+      target_modules = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
       peft_config = LoraConfig(
          task_type=TaskType.CAUSAL_LM,
          r=self.lora_r,
@@ -215,7 +215,7 @@ if __name__ == "__main__":
    eval_batch_size = 4
    gradient_accumulation_steps = 32
    num_epochs = 15
-   learning_rate = 5e-4
+   learning_rate = 2e-4
    max_input_length = 512
    max_target_length = 512
    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
