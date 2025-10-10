@@ -1,15 +1,15 @@
 import numpy as np
 import torch
-import tqdm
-import sys
 from peft import LoraConfig, get_peft_model, TaskType
-from torch.utils.data import DataLoader
-from transformers import AutoModelForCausalLM, AutoTokenizer, default_data_collator
-from datasets import load_dataset
+from transformers import AutoModelForCausalLM, AutoTokenizer
 from fastDP import PrivacyEngine
 from utils.model_utils import *
 from utils.gpu_usage import *
+from utils.preprocessing import preprocess_dataset
 from huggingface_hub import login
+import deepspeed
+import argparse
+import json
 import os
 
 # Login to HF CLI
@@ -24,7 +24,7 @@ class FastDPModel:
       dataset_name,
       train_batch_size,
       eval_batch_size,
-      gradient_accumulation_steps,
+      # gradient_accumulation_steps,
       num_epochs,
       learning_rate,
       max_input_length,
@@ -43,7 +43,7 @@ class FastDPModel:
       self.dataset_name = dataset_name
       self.train_batch_size = train_batch_size
       self.eval_batch_size = eval_batch_size
-      self.gradient_accumulation_steps = gradient_accumulation_steps
+      # self.gradient_accumulation_steps = gradient_accumulation_steps
       self.num_epochs = num_epochs
       self.learning_rate = learning_rate
       self.max_input_length = max_input_length
@@ -70,105 +70,31 @@ class FastDPModel:
 
 
    def preprocess_dataset(self, train_size, eval_size, seed=101):
-      dataset = load_dataset(self.dataset_name)
-      self.train_size = train_size
-
-      dataset["train"] = dataset["train"].shuffle(seed=seed).select(range(train_size))
-      dataset["validation"] = dataset["validation"].shuffle(seed=seed).select(range(eval_size))
-
-      # Initialize tokenizer first
+      # Initialize tokenizer
       self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
       self.tokenizer.pad_token = self.tokenizer.eos_token
       self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
 
-      def preprocess_and_tokenize_train(example):
-         input_text = "Context: " + example["context"] + " Question: " + example["question"] + " Answer: "
-         target_text = example["answers"]["text"][0] if len(example["answers"]["text"]) > 0 else ""
-         full_text = input_text + target_text
-         
-         tokenized = self.tokenizer(
-               full_text,
-               max_length=self.max_input_length + self.max_target_length,
-               truncation=True,
-               padding="max_length",
-         )
-
-         input_tokens = self.tokenizer(
-               input_text,
-               max_length=self.max_input_length,
-               truncation=True,
-               padding=False,
-               add_special_tokens=False
-         )
-         input_length = len(input_tokens["input_ids"])
-
-         labels = tokenized["input_ids"].copy()
-         labels[:input_length] = [-100] * input_length  # mask input
-         labels = [(l if l != self.tokenizer.pad_token_id else -100) for l in labels]
-
-         tokenized["labels"] = labels
-         return tokenized
-      
-      def preprocess_and_tokenize_eval(example):
-         # Prompt only (no gold answer appended to input_ids)
-         input_text = "Context: " + example["context"] + " Question: " + example["question"] + " Answer: "
-         target_text = example["answers"]["text"][0] if len(example["answers"]["text"]) > 0 else ""
-
-         # Tokenize prompt only for inputs
-         tokenized_inputs = self.tokenizer(
-               input_text,
-               max_length=self.max_input_length,
-               truncation=True,
-               padding="max_length"
-         )
-
-         # Tokenize full_text (with answer) just to build labels
-         tokenized_full = self.tokenizer(
-               input_text + target_text,
-               max_length=self.max_input_length + self.max_target_length,
-               truncation=True,
-               padding="max_length"
-         )
-
-         # Mask out the input part, keep only the answer portion for labels
-         labels = tokenized_full["input_ids"].copy()
-         input_length = len(self.tokenizer(input_text, add_special_tokens=False)["input_ids"])
-         labels[:input_length] = [-100] * input_length
-         labels = [(l if l != self.tokenizer.pad_token_id else -100) for l in labels]
-
-         tokenized_inputs["labels"] = labels
-         
-         return tokenized_inputs
-
-      train_dataset = dataset["train"].map(
-         preprocess_and_tokenize_train,
-         batched=False,
-         remove_columns=dataset["train"].column_names,
-      )
-
-      eval_dataset = dataset["validation"].map(
-         preprocess_and_tokenize_eval, 
-         batched=False,
-         remove_columns=dataset["validation"].column_names
-      )
-
-      self.train_loader = DataLoader(
-         train_dataset,
-         batch_size=self.train_batch_size,
-         shuffle=True,
-         collate_fn=default_data_collator,
-      )
-      
-      self.val_loader = DataLoader(
-         eval_dataset,
-         batch_size=self.eval_batch_size,
-         collate_fn=default_data_collator,
+      # Call the external preprocessing function
+      self.train_loader, self.val_loader = preprocess_dataset(
+         tokenizer=self.tokenizer,
+         dataset_name=self.dataset_name,
+         train_size=train_size,
+         eval_size=eval_size,
+         max_input_length=self.max_input_length,
+         max_target_length=self.max_target_length,
+         train_batch_size=self.train_batch_size,
+         eval_batch_size=self.eval_batch_size,
+         seed=seed
       )
 
    def init_model(self):
-      # Load model with automatic device mapping for multi-GPU support
-      self.model = AutoModelForCausalLM.from_pretrained(self.model_name, device_map="auto")
-      self.model = self.model.to(torch.float16)
+      # Load model with auto device mapping for tensor parallelism
+      self.model = AutoModelForCausalLM.from_pretrained(
+         self.model_name, 
+         torch_dtype=torch.float16,
+         device_map="auto"  # Let the model distribute itself across available GPUs
+      )
       self.model.gradient_checkpointing_enable()
 
       target_modules = self.lora_target_modules or ["q_proj", "k_proj", "v_proj", "o_proj"]
@@ -185,13 +111,13 @@ class FastDPModel:
       self.model.print_trainable_parameters()
 
       # Optimizer over only trainable (LoRA) params
-      trainable_params = (p for p in self.model.parameters() if p.requires_grad)
+      trainable_params = list(p for p in self.model.parameters() if p.requires_grad)
       self.optimizer = torch.optim.AdamW(trainable_params, lr=self.learning_rate)
 
-      effective_batch_size = self.train_batch_size * self.gradient_accumulation_steps
+      # Set up privacy engine
       self.privacy_engine = PrivacyEngine(
          self.model,
-         batch_size=effective_batch_size,
+         batch_size=self.train_batch_size,
          sample_size=self.train_size,
          epochs=self.num_epochs,
          target_epsilon=self.target_epsilon,
@@ -207,86 +133,130 @@ class FastDPModel:
 
    def train(self):
       self.model.train()
-      model_device = next(self.model.parameters()).device
-      model_dtype = next(self.model.parameters()).dtype
-      print(f"Model is using device: {model_device}, dtype: {model_dtype}")
-      
       for epoch in range(self.num_epochs):
          running_loss = 0.0
          for step, batch in enumerate(self.train_loader):
-               input_ids = batch["input_ids"].to(self.device)
-               attention_mask = batch["attention_mask"].to(self.device)
-               labels = batch["labels"].to(self.device)
+            input_ids = batch["input_ids"].to(self.device)
+            attention_mask = batch["attention_mask"].to(self.device)
+            labels = batch["labels"].to(self.device)
 
+            # Check if we're using DeepSpeed
+            is_deepspeed = hasattr(self.model, 'module')
+            
+            if is_deepspeed:
+               # DeepSpeed handles loss computation, backward, and optimizer steps
                outputs = self.model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
-               loss = outputs.loss / self.gradient_accumulation_steps
+               loss = outputs.loss
+               # DeepSpeed backward
+               self.model.backward(loss)
+               # DeepSpeed optimizer step
+               self.model.step()
+            else:
+               # Standard PyTorch training
+               outputs = self.model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
+               loss = outputs.loss
                loss.backward()
+               self.optimizer.step()
+               self.optimizer.zero_grad()
 
-               if (step + 1) % self.gradient_accumulation_steps == 0:
-                  self.optimizer.step()
-                  self.optimizer.zero_grad()
-
-               running_loss += loss.item()
-               if step % 500 == 0:
-                  print(f"Epoch {epoch+1}, Step {step}, Loss {running_loss / (step+1):.4f}")
+            running_loss += loss.item()
+            if step % 100 == 0:
+               print(f"Epoch {epoch+1}, Step {step}, Loss {running_loss / (step+1):.4f}")
+               # If using DeepSpeed with model parallel, print per GPU info
+               if is_deepspeed:
+                  print(f"GPU Rank: {torch.distributed.get_rank()}, World Size: {torch.distributed.get_world_size()}")
 
       # Detach privacy engine
       try:
          self.privacy_engine.detach()
-      except Exception:
+      except Exception as e:
+         print(f"Warning: Could not detach privacy engine: {e}")
          pass
 
-      # Save LoRA adapters only
-      adapter_dir = "./llama3-8b-instruct-squad-dp-lora"
-      self.model.save_pretrained(adapter_dir)
-      self.tokenizer.save_pretrained(adapter_dir)
+      # Save LoRA adapters only - ensure we save from the correct process if using DDP
+      adapter_dir = "./llama3-8b-flashdp-lora"
+      
+      # If we're using DeepSpeed, we need to save only from the main process
+      if hasattr(self.model, 'module'):
+         # Save using DeepSpeed's engine
+         self.model.save_checkpoint(adapter_dir)
+         # Ensure only the main process saves the tokenizer
+         if torch.distributed.get_rank() == 0:
+            self.tokenizer.save_pretrained(adapter_dir)
+      else:
+         # Regular saving for non-DeepSpeed runs
+         self.model.save_pretrained(adapter_dir)
+         self.tokenizer.save_pretrained(adapter_dir)
    
    def evaluate(self):
       if self.val_loader is None:
          print("Validation loader not initialized. Run preprocess_dataset() first.")
          return
-      model_device = next(self.model.parameters()).device
+      
+      # For distributed training, only evaluate on the main process
+      if hasattr(self.model, 'module') and torch.distributed.get_rank() != 0:
+         print(f"Skipping evaluation on non-main process (rank {torch.distributed.get_rank()})")
+         return
+      
+      # Handle DeepSpeed or regular model
+      if hasattr(self.model, 'module'):
+         # Using DeepSpeed - need to ensure we're evaluating correctly
+         evaluation_model = self.model.module  # Get the actual model from DeepSpeed engine
+         model_device = next(evaluation_model.parameters()).device
+      else:
+         evaluation_model = self.model
+         model_device = next(evaluation_model.parameters()).device
+      
       print("Evaluating...")
       evaluate_model(
-         self.model,
+         evaluation_model,
          self.val_loader,
          model_device,
          self.tokenizer,
-         max_gen_length=30,
+         max_gen_length=64,
          show_samples=10
       )
 
 
 
 if __name__ == "__main__":
+   parser = argparse.ArgumentParser(description='DeepSpeed FastDP Model Training')
+   
+   # Add arguments for DeepSpeed
+   parser.add_argument('--deepspeed', action='store_true', help='Enable DeepSpeed')
+   parser.add_argument('--deepspeed_config', type=str, default=None, help='Path to DeepSpeed config')
+   parser = deepspeed.add_config_arguments(parser)
+   
+   args = parser.parse_args()
+   
    # Model Configs
    model_name = "meta-llama/Meta-Llama-3-8B-Instruct"
    dataset_name = "squad"
-   train_batch_size = 1
-   eval_batch_size = 1
-   gradient_accumulation_steps = 8
+   train_batch_size = 4  # This will be automatically adjusted by DeepSpeed
+   eval_batch_size = 4
    num_epochs = 5
    learning_rate = 2e-4
    max_input_length = 512
    max_target_length = 512
    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-   target_epsilon = 8.0
+   target_epsilon = 2.0
    train_size = 5000
    eval_size = 500
-
-   if torch.cuda.device_count() == 0:
-      print("ERROR: FastDP requires a CUDA-enabled GPU to run.")
-      print("Please run this script on a machine with a CUDA GPU and the correct CUDA drivers installed.")
-      sys.exit(1)
-   print(f"Using {torch.cuda.device_count()} GPU(s).")
-
+   
+   # Adjust batch size if using DeepSpeed
+   if args.deepspeed and args.deepspeed_config:
+      with open(args.deepspeed_config, 'r') as f:
+         ds_config = json.load(f)
+      if 'train_batch_size' in ds_config:
+         train_batch_size = ds_config['train_batch_size']
+      print(f"Using DeepSpeed with config from {args.deepspeed_config}")
+      print(f"Adjusted train batch size to {train_batch_size}")
 
    fastdp = FastDPModel(
          model_name=model_name,
          dataset_name=dataset_name,
          train_batch_size=train_batch_size,
          eval_batch_size=eval_batch_size,
-         gradient_accumulation_steps=gradient_accumulation_steps,
          num_epochs=num_epochs,
          learning_rate=learning_rate,
          max_input_length=max_input_length,
@@ -300,6 +270,20 @@ if __name__ == "__main__":
 
    fastdp.preprocess_dataset(train_size=train_size, eval_size=eval_size, seed=101)
    fastdp.init_model()
+   
+   # Initialize DeepSpeed
+   if args.deepspeed:
+      # Convert model to DeepSpeed
+      model_engine, optimizer, _, _ = deepspeed.initialize(
+         args=args,
+         model=fastdp.model,
+         optimizer=fastdp.optimizer,
+         model_parameters=fastdp.model.parameters()
+      )
+      fastdp.model = model_engine
+      fastdp.optimizer = optimizer
+      print("Initialized model with DeepSpeed")
+   
    fastdp.train()
    
    print(f"Model: {model_name}")
@@ -310,10 +294,12 @@ if __name__ == "__main__":
    print(f"Learning rate: {learning_rate}")
    print(f"Max input length: {max_input_length}")
    print(f"Max target length: {max_target_length}")
-   print(f"Traing size: {train_size}")
+   print(f"Training size: {train_size}")
    print(f"Eval size: {eval_size}")
+   print(f"Epsilon: {target_epsilon}")
+   
    fastdp.evaluate()
 
-   # Ouput GPU logging
+   # Output GPU logging
    stop_gpu_utilization_logging(gpu_util_thread, gpu_util_stop_event)
    print_gpu_utilization_summary(gpu_util_data)

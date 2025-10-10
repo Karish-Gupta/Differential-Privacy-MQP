@@ -1,0 +1,31 @@
+{
+  "train_batch_size": 2,
+  "gradient_accumulation_steps": 1,
+  "fp16": {
+    "enabled": true
+  },
+  "zero_optimization": {
+    "stage": 3,
+    "overlap_comm": true,
+    "contiguous_gradients": true,
+    "reduce_bucket_size": 5e8,
+    "stage3_prefetch_bucket_size": 5e8,
+    "stage3_param_persistence_threshold": 1e6
+  },
+  "gradient_clipping": 1.0,
+  "steps_per_print": 100,
+  "wall_clock_breakdown": false,
+  "tensor_parallel": {
+    "enabled": true,
+    "tp_size": 2
+  },
+  "scheduler": {
+    "type": "WarmupLR",
+    "params": {
+      "warmup_min_lr": 0,
+      "warmup_max_lr": 2e-4,
+      "warmup_num_steps": 100
+    }
+  },
+  "communication_data_type": "fp16"
+}
