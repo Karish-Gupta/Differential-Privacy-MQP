@@ -7,9 +7,7 @@ from utils.model_utils import *
 from utils.gpu_usage import *
 from utils.preprocessing import preprocess_dataset
 from huggingface_hub import login
-import deepspeed
-import argparse
-import json
+from accelerate import Accelerator
 import os
 
 # Login to HF CLI
@@ -67,6 +65,8 @@ class FastDPModel:
       self.model = None
       self.optimizer = None
       self.privacy_engine = None
+      self.accelerator = Accelerator(mixed_precision="fp16") # Accelerate support
+
 
 
    def preprocess_dataset(self, train_size, eval_size, seed=101):
@@ -89,12 +89,8 @@ class FastDPModel:
       )
 
    def init_model(self):
-      # Load model with auto device mapping for tensor parallelism
-      self.model = AutoModelForCausalLM.from_pretrained(
-         self.model_name, 
-         torch_dtype=torch.float16,
-         device_map="auto"  # Let the model distribute itself across available GPUs
-      )
+      self.model = AutoModelForCausalLM.from_pretrained(self.model_name)
+      self.model = self.model.to(torch.float16)
       self.model.gradient_checkpointing_enable()
 
       target_modules = self.lora_target_modules or ["q_proj", "k_proj", "v_proj", "o_proj"]
@@ -111,13 +107,21 @@ class FastDPModel:
       self.model.print_trainable_parameters()
 
       # Optimizer over only trainable (LoRA) params
-      trainable_params = list(p for p in self.model.parameters() if p.requires_grad)
+      trainable_params = (p for p in self.model.parameters() if p.requires_grad)
       self.optimizer = torch.optim.AdamW(trainable_params, lr=self.learning_rate)
+      
+      # Prepare model, optimizer, and loaders with accelerator
+      self.model, self.optimizer, self.train_loader, self.val_loader = self.accelerator.prepare(
+         self.model,
+         self.optimizer, 
+         self.train_loader, 
+         self.val_loader
+      )
 
-      # Set up privacy engine
+      effective_batch_size = self.train_batch_size
       self.privacy_engine = PrivacyEngine(
          self.model,
-         batch_size=self.train_batch_size,
+         batch_size=effective_batch_size,
          sample_size=self.train_size,
          epochs=self.num_epochs,
          target_epsilon=self.target_epsilon,
@@ -136,80 +140,44 @@ class FastDPModel:
       for epoch in range(self.num_epochs):
          running_loss = 0.0
          for step, batch in enumerate(self.train_loader):
-            input_ids = batch["input_ids"].to(self.device)
-            attention_mask = batch["attention_mask"].to(self.device)
-            labels = batch["labels"].to(self.device)
+            outputs = self.model(
+                  input_ids=batch["input_ids"],
+                  attention_mask=batch["attention_mask"],
+                  labels=batch["labels"]
+            )
+            loss = outputs.loss
+            self.accelerator.backward(loss)
 
-            # Check if we're using DeepSpeed
-            is_deepspeed = hasattr(self.model, 'module')
-            
-            if is_deepspeed:
-               # DeepSpeed handles loss computation, backward, and optimizer steps
-               outputs = self.model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
-               loss = outputs.loss
-               # DeepSpeed backward
-               self.model.backward(loss)
-               # DeepSpeed optimizer step
-               self.model.step()
-            else:
-               # Standard PyTorch training
-               outputs = self.model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
-               loss = outputs.loss
-               loss.backward()
-               self.optimizer.step()
-               self.optimizer.zero_grad()
+            self.optimizer.step()
+            self.optimizer.zero_grad()
 
             running_loss += loss.item()
-            if step % 100 == 0:
-               print(f"Epoch {epoch+1}, Step {step}, Loss {running_loss / (step+1):.4f}")
-               # If using DeepSpeed with model parallel, print per GPU info
-               if is_deepspeed:
-                  print(f"GPU Rank: {torch.distributed.get_rank()}, World Size: {torch.distributed.get_world_size()}")
+            if step % 500 == 0:
+                  avg_loss = running_loss / (step + 1)
+                  if self.accelerator.is_main_process:  # only log once
+                     print(f"Epoch {epoch+1}, Step {step}, Loss {avg_loss:.4f}")
 
-      # Detach privacy engine
       try:
          self.privacy_engine.detach()
-      except Exception as e:
-         print(f"Warning: Could not detach privacy engine: {e}")
+      except Exception:
          pass
 
-      # Save LoRA adapters only - ensure we save from the correct process if using DDP
-      adapter_dir = "./llama3-8b-flashdp-lora"
-      
-      # If we're using DeepSpeed, we need to save only from the main process
-      if hasattr(self.model, 'module'):
-         # Save using DeepSpeed's engine
-         self.model.save_checkpoint(adapter_dir)
-         # Ensure only the main process saves the tokenizer
-         if torch.distributed.get_rank() == 0:
-            self.tokenizer.save_pretrained(adapter_dir)
-      else:
-         # Regular saving for non-DeepSpeed runs
-         self.model.save_pretrained(adapter_dir)
+      if self.accelerator.is_main_process:  # only main process saves
+         adapter_dir = "./llama3-8b-instruct-squad-dp-lora"
+         
+         # unwrap Accelerate wrapper when saving
+         self.accelerator.unwrap_model(self.model).save_pretrained(adapter_dir)
          self.tokenizer.save_pretrained(adapter_dir)
+
    
    def evaluate(self):
       if self.val_loader is None:
          print("Validation loader not initialized. Run preprocess_dataset() first.")
          return
-      
-      # For distributed training, only evaluate on the main process
-      if hasattr(self.model, 'module') and torch.distributed.get_rank() != 0:
-         print(f"Skipping evaluation on non-main process (rank {torch.distributed.get_rank()})")
-         return
-      
-      # Handle DeepSpeed or regular model
-      if hasattr(self.model, 'module'):
-         # Using DeepSpeed - need to ensure we're evaluating correctly
-         evaluation_model = self.model.module  # Get the actual model from DeepSpeed engine
-         model_device = next(evaluation_model.parameters()).device
-      else:
-         evaluation_model = self.model
-         model_device = next(evaluation_model.parameters()).device
-      
+      model_device = next(self.model.parameters()).device
       print("Evaluating...")
       evaluate_model(
-         evaluation_model,
+         self.model,
          self.val_loader,
          model_device,
          self.tokenizer,
@@ -220,20 +188,12 @@ class FastDPModel:
 
 
 if __name__ == "__main__":
-   parser = argparse.ArgumentParser(description='DeepSpeed FastDP Model Training')
-   
-   # Add arguments for DeepSpeed
-   parser.add_argument('--deepspeed', action='store_true', help='Enable DeepSpeed')
-   parser.add_argument('--deepspeed_config', type=str, default=None, help='Path to DeepSpeed config')
-   parser = deepspeed.add_config_arguments(parser)
-   
-   args = parser.parse_args()
-   
    # Model Configs
    model_name = "meta-llama/Meta-Llama-3-8B-Instruct"
    dataset_name = "squad"
-   train_batch_size = 4  # This will be automatically adjusted by DeepSpeed
+   train_batch_size = 4
    eval_batch_size = 4
+   # gradient_accumulation_steps = 8
    num_epochs = 5
    learning_rate = 2e-4
    max_input_length = 512
@@ -242,21 +202,14 @@ if __name__ == "__main__":
    target_epsilon = 2.0
    train_size = 5000
    eval_size = 500
-   
-   # Adjust batch size if using DeepSpeed
-   if args.deepspeed and args.deepspeed_config:
-      with open(args.deepspeed_config, 'r') as f:
-         ds_config = json.load(f)
-      if 'train_batch_size' in ds_config:
-         train_batch_size = ds_config['train_batch_size']
-      print(f"Using DeepSpeed with config from {args.deepspeed_config}")
-      print(f"Adjusted train batch size to {train_batch_size}")
+
 
    fastdp = FastDPModel(
          model_name=model_name,
          dataset_name=dataset_name,
          train_batch_size=train_batch_size,
          eval_batch_size=eval_batch_size,
+         # gradient_accumulation_steps=gradient_accumulation_steps,
          num_epochs=num_epochs,
          learning_rate=learning_rate,
          max_input_length=max_input_length,
@@ -270,20 +223,6 @@ if __name__ == "__main__":
 
    fastdp.preprocess_dataset(train_size=train_size, eval_size=eval_size, seed=101)
    fastdp.init_model()
-   
-   # Initialize DeepSpeed
-   if args.deepspeed:
-      # Convert model to DeepSpeed
-      model_engine, optimizer, _, _ = deepspeed.initialize(
-         args=args,
-         model=fastdp.model,
-         optimizer=fastdp.optimizer,
-         model_parameters=fastdp.model.parameters()
-      )
-      fastdp.model = model_engine
-      fastdp.optimizer = optimizer
-      print("Initialized model with DeepSpeed")
-   
    fastdp.train()
    
    print(f"Model: {model_name}")
@@ -294,12 +233,12 @@ if __name__ == "__main__":
    print(f"Learning rate: {learning_rate}")
    print(f"Max input length: {max_input_length}")
    print(f"Max target length: {max_target_length}")
-   print(f"Training size: {train_size}")
+   print(f"Traing size: {train_size}")
    print(f"Eval size: {eval_size}")
    print(f"Epsilon: {target_epsilon}")
    
    fastdp.evaluate()
 
-   # Output GPU logging
+   # Ouput GPU logging
    stop_gpu_utilization_logging(gpu_util_thread, gpu_util_stop_event)
    print_gpu_utilization_summary(gpu_util_data)
