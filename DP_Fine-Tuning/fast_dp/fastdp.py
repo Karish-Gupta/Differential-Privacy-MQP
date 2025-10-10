@@ -1,5 +1,7 @@
 import numpy as np
 import torch
+import torch.distributed as dist
+import functools
 from peft import LoraConfig, get_peft_model, TaskType
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from fastDP import PrivacyEngine
@@ -9,6 +11,22 @@ from utils.preprocessing import preprocess_dataset
 from huggingface_hub import login
 from accelerate import Accelerator
 import os
+
+# Import FSDP related modules
+from torch.distributed.fsdp import (
+   FullyShardedDataParallel as FSDP,
+   CPUOffload,
+   MixedPrecision,
+)
+from torch.distributed.fsdp.wrap import (
+   default_auto_wrap_policy,
+   enable_wrap,
+   wrap,
+)
+from torch.distributed.fsdp.fully_sharded_data_parallel import (
+   FullStateDictConfig,
+   StateDictType,
+)
 
 # Login to HF CLI
 if "HF_TOKEN" in os.environ:
@@ -35,6 +53,12 @@ class FastDPModel:
       lora_dropout=0.05,
       lora_target_modules=None,   # if None, good defaults for LLaMA
       lora_bias="none",           # "none" | "lora_only" | "all"
+      
+      # FSDP configs
+      use_fsdp=True,
+      fsdp_min_num_params=1e6,    # Min number of params for auto-wrapping (default: 1M)
+      cpu_offload=False,          # Whether to offload parameters to CPU
+      mixed_precision=True,       # Whether to use mixed precision
    ):
       # Configs
       self.model_name = model_name
@@ -56,6 +80,12 @@ class FastDPModel:
       self.lora_dropout = lora_dropout
       self.lora_target_modules = lora_target_modules
       self.lora_bias = lora_bias
+      
+      # FSDP configs
+      self.use_fsdp = use_fsdp
+      self.fsdp_min_num_params = fsdp_min_num_params
+      self.cpu_offload = cpu_offload
+      self.mixed_precision = mixed_precision
 
       # Setup
       self.dataset = None
@@ -65,7 +95,20 @@ class FastDPModel:
       self.model = None
       self.optimizer = None
       self.privacy_engine = None
-      self.accelerator = Accelerator(mixed_precision="fp16") # Accelerate support
+      
+      # Initialize distributed environment if using FSDP
+      if self.use_fsdp and not dist.is_initialized():
+         dist.init_process_group(backend="nccl")
+         self.local_rank = int(os.environ.get("LOCAL_RANK", 0))
+         self.rank = int(os.environ.get("RANK", 0))
+         self.world_size = int(os.environ.get("WORLD_SIZE", 1))
+         torch.cuda.set_device(self.local_rank)
+         self.is_main_process = (self.rank == 0)
+         self.accelerator = None
+      else:
+         # Fall back to Accelerator if not using FSDP
+         self.accelerator = Accelerator(mixed_precision="fp16")
+         self.is_main_process = self.accelerator.is_main_process
 
 
 
@@ -75,7 +118,18 @@ class FastDPModel:
       self.tokenizer.pad_token = self.tokenizer.eos_token
       self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
 
-      # Call the external preprocessing function
+      # Set up distributed sampler parameters if using FSDP
+      sampler_params = None
+      if self.use_fsdp:
+         sampler_params = {
+            "rank": self.rank,
+            "world_size": self.world_size,
+            "shuffle": True
+         }
+         if self.is_main_process:
+            print(f"Setting up distributed sampler with world_size={self.world_size}")
+
+      # Call the external preprocessing function with distributed sampler parameters if needed
       self.train_loader, self.val_loader = preprocess_dataset(
          tokenizer=self.tokenizer,
          dataset_name=self.dataset_name,
@@ -85,7 +139,8 @@ class FastDPModel:
          max_target_length=self.max_target_length,
          train_batch_size=self.train_batch_size,
          eval_batch_size=self.eval_batch_size,
-         seed=seed
+         seed=seed,
+         sampler_params=sampler_params
       )
 
    def init_model(self):
@@ -104,21 +159,56 @@ class FastDPModel:
       )
 
       self.model = get_peft_model(self.model, peft_config)
-      self.model.print_trainable_parameters()
+      if self.is_main_process:
+         self.model.print_trainable_parameters()
 
+      # Wrap model with FSDP if enabled
+      if self.use_fsdp:
+         # Define mixed precision policy if enabled
+         mixed_precision_policy = None
+         if self.mixed_precision:
+            mixed_precision_policy = MixedPrecision(
+               param_dtype=torch.float16,
+               reduce_dtype=torch.float16,
+               buffer_dtype=torch.float16,
+            )
+         
+         # Define CPU offload if enabled
+         cpu_offload_config = None
+         if self.cpu_offload:
+            cpu_offload_config = CPUOffload(offload_params=True)
+         
+         # Define auto wrap policy
+         auto_wrap_policy = functools.partial(
+            default_auto_wrap_policy,
+            min_num_params=self.fsdp_min_num_params,
+         )
+         
+         # Wrap the model with FSDP
+         self.model = FSDP(
+            self.model,
+            fsdp_auto_wrap_policy=auto_wrap_policy,
+            cpu_offload=cpu_offload_config,
+            mixed_precision=mixed_precision_policy,
+         )
+         
+         if self.is_main_process:
+            print(f"Model wrapped with FSDP, world size: {self.world_size}")
+      
       # Optimizer over only trainable (LoRA) params
       trainable_params = (p for p in self.model.parameters() if p.requires_grad)
       self.optimizer = torch.optim.AdamW(trainable_params, lr=self.learning_rate)
       
-      # Prepare model, optimizer, and loaders with accelerator
-      self.model, self.optimizer, self.train_loader, self.val_loader = self.accelerator.prepare(
-         self.model,
-         self.optimizer, 
-         self.train_loader, 
-         self.val_loader
-      )
+      if self.accelerator:
+         # Prepare model, optimizer, and loaders with accelerator
+         self.model, self.optimizer, self.train_loader, self.val_loader = self.accelerator.prepare(
+            self.model,
+            self.optimizer, 
+            self.train_loader, 
+            self.val_loader
+         )
 
-      effective_batch_size = self.train_batch_size
+      effective_batch_size = self.train_batch_size * (self.world_size if self.use_fsdp else 1)
       self.privacy_engine = PrivacyEngine(
          self.model,
          batch_size=effective_batch_size,
@@ -130,9 +220,11 @@ class FastDPModel:
          clipping_style="all-layer"
       )
 
-      print("Attaching PrivacyEngine...")
+      if self.is_main_process:
+         print("Attaching PrivacyEngine...")
       self.privacy_engine.attach(self.optimizer)
-      print("PrivacyEngine attached.")
+      if self.is_main_process:
+         print("PrivacyEngine attached.")
 
 
    def train(self):
@@ -140,13 +232,21 @@ class FastDPModel:
       for epoch in range(self.num_epochs):
          running_loss = 0.0
          for step, batch in enumerate(self.train_loader):
+            # Move batch to the appropriate device
+            if self.use_fsdp:
+               batch = {k: v.to(self.local_rank) for k, v in batch.items()}
+            
             outputs = self.model(
                   input_ids=batch["input_ids"],
                   attention_mask=batch["attention_mask"],
                   labels=batch["labels"]
             )
             loss = outputs.loss
-            self.accelerator.backward(loss)
+            
+            if self.accelerator:
+               self.accelerator.backward(loss)
+            else:
+               loss.backward()
 
             self.optimizer.step()
             self.optimizer.zero_grad()
@@ -154,7 +254,7 @@ class FastDPModel:
             running_loss += loss.item()
             if step % 500 == 0:
                   avg_loss = running_loss / (step + 1)
-                  if self.accelerator.is_main_process:  # only log once
+                  if self.is_main_process:  # only log once
                      print(f"Epoch {epoch+1}, Step {step}, Loss {avg_loss:.4f}")
 
       try:
@@ -162,28 +262,59 @@ class FastDPModel:
       except Exception:
          pass
 
-      if self.accelerator.is_main_process:  # only main process saves
+      if self.is_main_process:  # only main process saves
          adapter_dir = "./llama3-8b-instruct-squad-dp-lora"
          
-         # unwrap Accelerate wrapper when saving
-         self.accelerator.unwrap_model(self.model).save_pretrained(adapter_dir)
-         self.tokenizer.save_pretrained(adapter_dir)
+         if self.use_fsdp:
+            # FSDP state dict for saving
+            save_policy = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
+            with FSDP.state_dict_type(self.model, StateDictType.FULL_STATE_DICT, save_policy):
+               state_dict = self.model.state_dict()
+               if self.is_main_process:
+                  # Need to extract the base model for saving with PEFT
+                  unwrapped_model = self.model.module  # Get the model without FSDP wrapper
+                  unwrapped_model.save_pretrained(adapter_dir)
+                  self.tokenizer.save_pretrained(adapter_dir)
+         else:
+            # unwrap Accelerate wrapper when saving
+            self.accelerator.unwrap_model(self.model).save_pretrained(adapter_dir)
+            self.tokenizer.save_pretrained(adapter_dir)
+         
+         print(f"Model adapter saved to {adapter_dir}")
 
    
    def evaluate(self):
       if self.val_loader is None:
          print("Validation loader not initialized. Run preprocess_dataset() first.")
          return
+      
+      # Only evaluate on main process
+      if not self.is_main_process:
+         return
+         
       model_device = next(self.model.parameters()).device
       print("Evaluating...")
-      evaluate_model(
-         self.model,
-         self.val_loader,
-         model_device,
-         self.tokenizer,
-         max_gen_length=64,
-         show_samples=10
-      )
+      
+      # For FSDP, need to consolidate model for evaluation
+      if self.use_fsdp:
+         with FSDP.summon_full_params(self.model):
+            evaluate_model(
+               self.model,
+               self.val_loader,
+               model_device,
+               self.tokenizer,
+               max_gen_length=64,
+               show_samples=10
+            )
+      else:
+         evaluate_model(
+            self.model,
+            self.val_loader,
+            model_device,
+            self.tokenizer,
+            max_gen_length=64,
+            show_samples=10
+         )
 
 
 
@@ -202,6 +333,12 @@ if __name__ == "__main__":
    target_epsilon = 2.0
    train_size = 5000
    eval_size = 500
+   
+   # FSDP Configs
+   use_fsdp = True
+   fsdp_min_num_params = 1e6  # Auto-wrap modules with >1M params
+   cpu_offload = False
+   mixed_precision = True
 
 
    fastdp = FastDPModel(
@@ -215,7 +352,12 @@ if __name__ == "__main__":
          max_input_length=max_input_length,
          max_target_length=max_target_length,
          target_epsilon=target_epsilon,
-         train_size=train_size
+         train_size=train_size,
+         # FSDP parameters
+         use_fsdp=use_fsdp,
+         fsdp_min_num_params=fsdp_min_num_params,
+         cpu_offload=cpu_offload,
+         mixed_precision=mixed_precision
    )
 
    # Start GPU utilization logging using utils

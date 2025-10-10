@@ -29,9 +29,9 @@ pip install scikit-learn
 pip install accelerate
 pip install peft
 
-accelerate launch \
-  --multi_gpu \
-  --mixed_precision=fp16 \
-  --num_processes 2 \
-  --num_machines 1 \
+python -m torch.distributed.launch \
+  --nproc_per_node=2 \
+  --nnodes=1 \
+  --master_addr="localhost" \
+  --master_port=29500 \
   -m fast_dp.fastdp
