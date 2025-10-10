@@ -22,7 +22,7 @@ class FastDPModel:
       dataset_name,
       train_batch_size,
       eval_batch_size,
-      # gradient_accumulation_steps,
+      gradient_accumulation_steps,
       num_epochs,
       learning_rate,
       max_input_length,
@@ -30,8 +30,8 @@ class FastDPModel:
       target_epsilon,
       train_size,
 
-      lora_r=16,
-      lora_alpha=16,
+      lora_r=64,
+      lora_alpha=64,
       lora_dropout=0.05,
       lora_target_modules=None,   # if None, good defaults for LLaMA
       lora_bias="none",           # "none" | "lora_only" | "all"
@@ -41,7 +41,7 @@ class FastDPModel:
       self.dataset_name = dataset_name
       self.train_batch_size = train_batch_size
       self.eval_batch_size = eval_batch_size
-      # self.gradient_accumulation_steps = gradient_accumulation_steps
+      self.gradient_accumulation_steps = gradient_accumulation_steps
       self.num_epochs = num_epochs
       self.learning_rate = learning_rate
       self.max_input_length = max_input_length
@@ -93,7 +93,7 @@ class FastDPModel:
       self.model = self.model.to(torch.float16)
       self.model.gradient_checkpointing_enable()
 
-      target_modules = self.lora_target_modules or ["q_proj", "k_proj", "v_proj", "o_proj"]
+      target_modules = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
       peft_config = LoraConfig(
          task_type=TaskType.CAUSAL_LM,
          r=self.lora_r,
@@ -127,47 +127,81 @@ class FastDPModel:
          target_epsilon=self.target_epsilon,
          clipping_fn="automatic",
          clipping_mode="MixOpt",
-         clipping_style="all-layer"
+         clipping_style="layer-wise",
+         loss_reduction="mean",
+         record_snr=True,
+         accounting_mode="rdp"
       )
 
       print("Attaching PrivacyEngine...")
       self.privacy_engine.attach(self.optimizer)
       print("PrivacyEngine attached.")
 
+      print(f"\nPrivacy Configuration:")
+      print(f"  Target ε: {self.target_epsilon}")
+      print(f"  Target δ: {self.train_size ** -1.1:.2e}")
+      print(f"  Effective batch size: {effective_batch_size}")
+      print(f"  Training samples: {self.train_size}")
+      print(f"  Epochs: {self.num_epochs}")
+      print(f"  Steps per epoch: {self.train_size // effective_batch_size}")
+
 
    def train(self):
       self.model.train()
+      global_step = 0
+
       for epoch in range(self.num_epochs):
          running_loss = 0.0
+         epoch_steps = 0
+
          for step, batch in enumerate(self.train_loader):
+            # Move batch to device (Accelerate handles this internally)
+            input_ids = batch["input_ids"]
+            attention_mask = batch["attention_mask"]
+            labels = batch["labels"]
+
+            # Forward pass
             outputs = self.model(
-                  input_ids=batch["input_ids"],
-                  attention_mask=batch["attention_mask"],
-                  labels=batch["labels"]
+                  input_ids=input_ids,
+                  attention_mask=attention_mask,
+                  labels=labels
             )
             loss = outputs.loss
+            loss = loss / self.gradient_accumulation_steps  # normalize for accumulation
+
+            # Backward pass with Accelerate
             self.accelerator.backward(loss)
 
-            self.optimizer.step()
-            self.optimizer.zero_grad()
+            # Gradient accumulation
+            if (step + 1) % self.gradient_accumulation_steps == 0:
+                  self.optimizer.step()
+                  self.optimizer.zero_grad()
+                  global_step += 1
+                  epoch_steps += 1
 
-            running_loss += loss.item()
-            if step % 500 == 0:
+            # Track loss (rescale for accurate reporting)
+            running_loss += loss.item() * self.gradient_accumulation_steps
+
+            # Periodic logging (main process only)
+            if (step + 1) % 500 == 0 and self.accelerator.is_main_process:
                   avg_loss = running_loss / (step + 1)
-                  if self.accelerator.is_main_process:  # only log once
-                     print(f"Epoch {epoch+1}, Step {step}, Loss {avg_loss:.4f}")
+                  print(
+                     f"Epoch {epoch+1}/{self.num_epochs}, "
+                     f"Step {step+1}, Loss: {avg_loss:.4f}, "
+                     f"Global Step: {global_step}"
+                  )
 
-      try:
-         self.privacy_engine.detach()
-      except Exception:
-         pass
+         # Epoch summary
+         if self.accelerator.is_main_process:
+            epoch_loss = running_loss / len(self.train_loader)
+            print(f"\n{'='*60}")
+            print(f"Epoch {epoch+1}/{self.num_epochs} Complete")
+            print(f"  Average Loss: {epoch_loss:.4f}")
+            print(f"  Steps: {epoch_steps}")
+            print(f"{'='*60}\n")
 
-      if self.accelerator.is_main_process:  # only main process saves
-         adapter_dir = "./llama3-8b-instruct-squad-dp-lora"
-         
-         # unwrap Accelerate wrapper when saving
-         self.accelerator.unwrap_model(self.model).save_pretrained(adapter_dir)
-         self.tokenizer.save_pretrained(adapter_dir)
+      # Detach privacy engine
+      self.privacy_engine.detach()
 
    
    def evaluate(self):
@@ -193,8 +227,8 @@ if __name__ == "__main__":
    dataset_name = "squad"
    train_batch_size = 4
    eval_batch_size = 4
-   # gradient_accumulation_steps = 8
-   num_epochs = 5
+   gradient_accumulation_steps = 32
+   num_epochs = 15
    learning_rate = 2e-4
    max_input_length = 512
    max_target_length = 512
@@ -209,7 +243,7 @@ if __name__ == "__main__":
          dataset_name=dataset_name,
          train_batch_size=train_batch_size,
          eval_batch_size=eval_batch_size,
-         # gradient_accumulation_steps=gradient_accumulation_steps,
+         gradient_accumulation_steps=gradient_accumulation_steps,
          num_epochs=num_epochs,
          learning_rate=learning_rate,
          max_input_length=max_input_length,

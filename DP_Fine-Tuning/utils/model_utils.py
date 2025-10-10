@@ -15,7 +15,7 @@ def calculate_contains_acc(preds, refs):
     """
     Returns contains accuracy
     """
-    return np.mean([1 if r.lower() in p.lower() or p.lower() in r.lower() else 0 for p, r in zip(preds, refs)])
+    return np.mean([1 if r.lower() in p.lower() else 0 for p, r in zip(preds, refs)])
 
 def calculate_f1(preds, refs):
     """

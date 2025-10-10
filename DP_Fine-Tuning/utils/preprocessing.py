@@ -113,17 +113,6 @@ def preprocess_dataset(
       target_text = example["answers"]["text"][0] if example["answers"]["text"] else ""
       tokenized["target_text"] = target_text
 
-      # Tokenize target for BLEU/ROUGE metrics if needed
-      target_tokenized = tokenizer(
-         target_text, 
-         max_length=max_target_length, 
-         truncation=True, 
-         padding="max_length", 
-         add_special_tokens=False
-      )
-      tokenized["target_input_ids"] = target_tokenized["input_ids"]
-      tokenized["target_attention_mask"] = target_tokenized["attention_mask"]
-
       return tokenized
 
    # Map datasets
